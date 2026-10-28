@@ -285,9 +285,38 @@ def project_lock(root):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PasarGuard Node + HAProxy + Caddy, один публичный порт 443")
-    parser.add_argument("command", choices=("prepare", "check", "up", "info", "status", "logs", "down"))
+    parser = argparse.ArgumentParser(
+        prog="pgn",
+        description="PasarGuard Node + HAProxy + Caddy, один публичный порт 443",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Команды:
+  help     показать эту справку
+  prepare  создать конфиги, API-ключ и сертификат; вывести данные панели
+  check    подготовить и проверить Compose, HAProxy и Caddy
+  up       подготовить, проверить и запустить контейнеры
+  info     показать данные подключения ноды к панели
+  status   показать состояние контейнеров
+  logs     показать последние 100 строк логов каждого сервиса
+  down     остановить контейнеры, сохранив .env и state/
+
+Первый запуск:
+  cp .env.example .env
+  nano .env
+  sudo ./pgn up
+
+Справка работает без .env, Docker и прав root.
+Данные API-ключа выводятся командами prepare, up и info.
+""",
+    )
+    parser.add_argument(
+        "command", nargs="?", default="help", metavar="команда",
+        choices=("help", "prepare", "check", "up", "info", "status", "logs", "down"),
+        help="команда (по умолчанию: help)",
+    )
     args = parser.parse_args()
+    if args.command == "help":
+        parser.print_help()
+        return 0
     os.umask(0o077)
     try:
         with project_lock(ROOT):

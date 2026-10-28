@@ -24,7 +24,7 @@ sudo apt-get install -y git python3 openssl
 ## Быстрый запуск
 
 ```sh
-git clone <URL-вашего-репозитория> pgn
+git clone https://github.com/thefakedevs/pgn.git pgn
 cd pgn
 cp .env.example .env
 nano .env
@@ -91,6 +91,7 @@ XHTTP_PATH=/assets/your-path-from-panel/
 ## Команды
 
 ```sh
+./pgn help         # справка без .env, Docker и прав root
 sudo ./pgn prepare  # создать конфиги и identity API без Docker; вывести данные панели
 sudo ./pgn check    # подготовка + проверки Compose/HAProxy/Caddy без запуска сервисов
 sudo ./pgn up       # подготовка + проверки + запуск/применение изменений
@@ -99,6 +100,8 @@ sudo ./pgn status   # состояние контейнеров
 sudo ./pgn logs     # последние 100 строк логов каждого сервиса
 sudo ./pgn down     # остановить и удалить контейнеры; сохранить state и .env
 ```
+
+`./pgn`, `./pgn help` и `./pgn --help` выводят одну и ту же справку.
 
 `prepare` и `check` при первом запуске создают постоянные учётные данные API. Данные панели выводятся командами `prepare`, `up` и `info`, поэтому их вывод содержит API-ключ. Не публикуйте его. `logs` может содержать адреса и данные VPN-соединений.
 
