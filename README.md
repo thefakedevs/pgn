@@ -237,7 +237,9 @@ sudo docker compose --profile access-logs run --rm --no-deps vector validate /et
 
 При собственном CA для этой прямой команды в DSN дополнительно укажите
 `sslrootcert=/etc/vector/postgres-ca.pem` через защищённое окружение Docker Compose;
-обычные команды `./pgn` добавляют этот параметр сами. Sink healthcheck выполняет
+обычные команды `./pgn` добавляют этот параметр сами. Запускайте эту проверку до
+`up` либо после `docker compose --profile access-logs stop vector`, чтобы проверочный
+контейнер не конкурировал за дисковый буфер с работающим Vector. Sink healthcheck выполняет
 `SELECT 1`; проверяйте приём отдельно запросом к `pgn.access_logs` от владельца БД.
 Compose явно разрешает подстановку окружения Vector для ссылки на DSN в статическом
 шаблоне (`VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true`, требуется с Vector 0.57).
@@ -331,15 +333,18 @@ python3 tests/integration/access_logs.py
 
 ```text
 .env.example             # пользовательские параметры
-compose.yml              # официальные образы с тегом latest
+compose.yml              # официальные образы; Vector закреплён на версии
 pgn                      # точка входа
 scripts/pgn.py           # подготовка, проверки и управление
-templates/               # HAProxy / Caddy
+templates/               # HAProxy / Caddy / опциональный Vector
+sql/                     # миграции access-логов и пример обработки
 site/                    # HTTPS-сайт
 config/                  # генерируется, исключено из Git
 state/node/certs/        # identity управляющего API, исключено из Git
 state/node/generated/    # каталог PGN; не считать резервной копией Xray
 state/caddy/             # ACME и сертификаты сайта, исключено из Git
+state/node/logs/         # логи Xray при включении через панель
+state/vector/            # постоянный буфер и checkpoints Vector
 ```
 
 В Compose используются `pasarguard/node:latest`, `haproxy:latest` и `caddy:latest`.

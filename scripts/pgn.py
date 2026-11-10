@@ -92,19 +92,21 @@ def validate(values):
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", values["ACCESS_LOG_NODE_ID"]):
             raise ConfigError("ACCESS_LOG_NODE_ID: требуется стабильный ID (1–128 символов A-Z, a-z, 0-9, _, ., :, -).")
         size = values["ACCESS_LOG_BUFFER_BYTES"]
-        if not size.isdecimal() or not 268435488 <= int(size) <= 2**63 - 1:
+        if not size.isdecimal() or len(size) > 19 or not 268435488 <= int(size) <= 2**63 - 1:
             raise ConfigError("ACCESS_LOG_BUFFER_BYTES: целое число от 268435488 до 9223372036854775807.")
         try:
             uri = urlsplit(values["ACCESS_LOG_POSTGRES_DSN"])
             options = parse_qsl(uri.query, keep_blank_values=True)
-            if (uri.scheme not in {"postgres", "postgresql"} or not uri.hostname
+            if (any(not 33 <= ord(ch) <= 126 for ch in values["ACCESS_LOG_POSTGRES_DSN"])
+                    or uri.scheme not in {"postgres", "postgresql"} or not uri.hostname
                     or not uri.path.strip("/") or uri.fragment or ':' == uri.netloc[-1:]
                     or [v for k, v in options if k == "sslmode"] != ["verify-full"]
                     or any(k.lower() in {"host", "hostaddr", "sslmode", "ssl-mode", "sslrootcert", "ssl-root-cert"}
                            and k != "sslmode" for k, _ in options)
                     or len({k for k, _ in options}) != len(options)):
                 raise ValueError
-            uri.port  # Validate the optional numeric port without exposing the URI.
+            if uri.port == 0:  # Also validates optional numeric port without exposing the URI.
+                raise ValueError
         except (ValueError, TypeError):
             raise ConfigError("ACCESS_LOG_POSTGRES_DSN: нужен PostgreSQL URI с БД и sslmode=verify-full; CA задаётся отдельным параметром.") from None
     return values

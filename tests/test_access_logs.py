@@ -30,6 +30,8 @@ class AccessLogTests(unittest.TestCase):
                           ("ACCESS_LOG_POSTGRES_DSN", "postgres://db/logs?sslmode=require"),
                           ("ACCESS_LOG_POSTGRES_DSN", "postgres://db/logs?sslmode=verify-full&sslmode=disable"),
                           ("ACCESS_LOG_POSTGRES_DSN", "postgres://db/logs?sslmode=verify-full&ssl-mode=disable"),
+                          ("ACCESS_LOG_POSTGRES_DSN", "postgres://db:0/logs?sslmode=verify-full"),
+                          ("ACCESS_LOG_POSTGRES_DSN", "postgres://user:bad password@db/logs?sslmode=verify-full"),
                           ("ACCESS_LOG_POSTGRES_DSN", "postgres://db:bad/logs?sslmode=verify-full")]:
             with self.subTest(name=name, value=bad), self.assertRaises(pgn.ConfigError) as error:
                 pgn.validate(dict(self.enabled, **{name: bad}))
