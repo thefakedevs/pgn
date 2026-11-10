@@ -1,4 +1,4 @@
-# The existing SNI route reaches this UNIX listener; no additional TCP bind.
+# The existing SNI route reaches this listener; maintenance is loopback-only.
 frontend management_http
     mode http
     option httplog
@@ -15,7 +15,7 @@ frontend management_http
 backend maintenance_api
     mode http
     timeout server 330s
-    server serviced /run/pgn/maintenance.sock
+    server serviced 127.0.0.1:62051 ssl verify required ca-file /etc/pgn/tls/node-ca.pem verifyhost @@API_DOMAIN@@ sni str(@@API_DOMAIN@@)
 
 backend management_grpc
     mode http

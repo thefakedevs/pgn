@@ -242,71 +242,45 @@ def update(root, args, values, compose):
     print(f"{args.command}: completed; node and Xray are running. Rollback: {backup}")
 
 
-def unit_name(values):
-    return "pgn-" + values["COMPOSE_PROJECT_NAME"] + "-maintenance.service"
-
-
 def install(root, values, compose):
-    if os.geteuid() != 0:
-        raise MaintenanceError("maintenance-install requires root")
-    # Avoid systemd specifier and dotenv interpolation in generated native units.
-    if not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(root)):
-        raise MaintenanceError("Use a project path with letters, digits, /, _, . and -")
-    run_dir = root / "state/maintenance/run"
-    if len(str(run_dir / "maintenance.sock").encode()) >= 104:
-        raise MaintenanceError("Project path is too long for a Unix socket")
-    run_dir.mkdir(parents=True, exist_ok=True)
-    run_dir.chmod(0o755)
-    binary_dir = root / "state/maintenance/bin"
-    binary_dir.mkdir(parents=True, exist_ok=True)
-    source = root / "maintenance/node-serviced"
-    builder = "golang:1.25.5-bookworm"
-    if shutil.which("go"):
-        env = dict(os.environ, CGO_ENABLED="0")
-        subprocess.run(["go", "test", "./..."], cwd=source, env=env, check=True)
-        subprocess.run(["go", "build", "-trimpath", "-o", str(binary_dir / "node-serviced.new"), "."], cwd=source, env=env, check=True)
-    else:
-        command(["docker", "run", "--rm", "--mount", f"type=bind,src={source},dst=/src,readonly",
-                 "--mount", f"type=bind,src={binary_dir},dst=/out", "-w", "/src", "-e", "CGO_ENABLED=0", builder,
-                 "sh", "-ec", "go test ./...; go build -trimpath -o /out/node-serviced.new ."])
-    (binary_dir / "node-serviced.new").chmod(0o755)
-    (binary_dir / "node-serviced.new").replace(binary_dir / "node-serviced")
-    gid = compose(root, values, "run", "--rm", "--no-deps", "-T", "--entrypoint", "id", "haproxy", "-g", "haproxy", capture=True).strip()
-    if not gid.isdigit():
-        raise MaintenanceError("Cannot determine HAProxy socket group")
-    env_path = root / "state/maintenance/service.env"
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    env_path.write_text(f"API_KEY={values['API_KEY']}\nAPP_NAME={root}/pgn\nSOCKET_PATH={run_dir}/maintenance.sock\nSOCKET_GID={gid}\n")
-    env_path.chmod(0o600)
-    unit = f"""[Unit]
-Description=PGN maintenance API over Unix socket
-After=docker.service
-Requires=docker.service
-
-[Service]
-Type=simple
-WorkingDirectory={root}
-Environment=ENV_FILE={env_path}
-ExecStart={binary_dir}/node-serviced
-Restart=on-failure
-RestartSec=3
-UMask=0077
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ReadWritePaths={root}
-
-[Install]
-WantedBy=multi-user.target
-"""
-    name = unit_name(values)
-    unit_path = Path("/etc/systemd/system") / name
-    unit_path.write_text(unit)
-    command(["systemctl", "daemon-reload"])
-    command(["systemctl", "enable", "--now", name])
-    command(["systemctl", "restart", name])
-    command(["systemctl", "is-active", "--quiet", name])
-    print("Unix maintenance API installed. Set MAINTENANCE_ENABLED=true, run ./pgn up, then set API port=443 in the panel.")
+    """Package an unchanged, checksum-verified official release binary."""
+    import tarfile
+    names = {"x86_64": "Linux_x86_64", "aarch64": "Linux_arm64"}
+    arch = platform.machine()
+    if arch not in names:
+        raise MaintenanceError("Supported service platforms: Linux x86_64 and aarch64")
+    info = release("PasarGuard/node-serviced", "v0.0.4")
+    name = "node-serviced_0.0.4_" + names[arch] + ".tar.gz"
+    archive = asset(info, name)
+    checksums = asset(info, "checksums.txt").decode("ascii")
+    rows = [line.split() for line in checksums.splitlines() if line.strip()]
+    matches = [parts[0] for parts in rows if len(parts) == 2 and parts[1].lstrip("*") == name]
+    if len(matches) != 1 or hashlib.sha256(archive).hexdigest() != matches[0]:
+        raise MaintenanceError("node-serviced checksum mismatch")
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
+        matches = [m for m in bundle.getmembers() if Path(m.name).name == "node-serviced" and m.isfile()]
+        if len(matches) != 1:
+            raise MaintenanceError("Missing official node-serviced binary")
+        binary = bundle.extractfile(matches[0]).read()
+    if not binary.startswith(b"\x7fELF"):
+        raise MaintenanceError("Expected a Linux service binary")
+    image = root / "state/maintenance/image"
+    image.mkdir(parents=True, exist_ok=True)
+    (image / "node-serviced").write_bytes(binary)
+    (image / "node-serviced").chmod(0o755)
+    (image / "Dockerfile").write_text(
+        "FROM docker:29.9.3-cli\n"
+        "RUN apk add --no-cache python3 openssl\n"
+        "COPY --chmod=0755 node-serviced /usr/local/bin/node-serviced\n"
+        'ENTRYPOINT ["/usr/local/bin/node-serviced"]\n')
+    (image / ".dockerignore").write_text("*\n!Dockerfile\n!node-serviced\n")
+    write_json(image / "source.json", {"release": "v0.0.4", "asset": name,
+               "archive_sha256": hashlib.sha256(archive).hexdigest(),
+               "binary_sha256": hashlib.sha256(binary).hexdigest()})
+    # Do not start services or change .env during installation.
+    enabled = dict(values, MAINTENANCE_ENABLED="true")
+    compose(root, enabled, "build", "maintenance")
+    print("Official service image prepared. Set MAINTENANCE_ENABLED=true, run ./pgn up, and set API port=443 in the panel.")
 
 
 def execute(root, args, values, compose):
@@ -316,7 +290,7 @@ def execute(root, args, values, compose):
         if args.command == "maintenance-install":
             install(root, values, compose)
         elif args.command == "maintenance-status":
-            print(command(["systemctl", "status", "--no-pager", unit_name(values)]))
+            compose(root, values, "ps", "maintenance")
         elif args.command == "restart":
             compose(root, values, "restart", "pg-node")
         else:

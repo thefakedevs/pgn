@@ -221,6 +221,7 @@ def prepare(root):
 def compose(root, values, *args, capture=False):
     env = os.environ.copy()
     env.update(values)
+    env["PGN_ROOT"] = str(root.resolve())
     digest = hashlib.sha256()
     for name in ("config/haproxy.cfg", "config/Caddyfile", "state/maintenance/tls/management.pem"):
         path = root / name
@@ -228,6 +229,8 @@ def compose(root, values, *args, capture=False):
             digest.update(name.encode() + b"\0" + path.read_bytes())
     env["PGN_CONFIG_REVISION"] = digest.hexdigest()
     files = ["-f", str(root / "compose.yml")]
+    if values.get("MAINTENANCE_ENABLED") == "true":
+        files += ["-f", str(root / "maintenance/compose.yml")]
     override = root / "config/node-runtime.compose.json"
     if override.exists():
         files += ["-f", str(override)]
@@ -320,8 +323,8 @@ def main():
   status   показать состояние контейнеров
   logs     показать последние 100 строк логов каждого сервиса
   down     остановить контейнеры, сохранив .env и state/
-  maintenance-install  собрать и установить host API только на Unix-сокете
-  maintenance-status   показать состояние host API
+  maintenance-install  скачать готовый официальный API и подготовить образ
+  maintenance-status   показать состояние контейнера API
   update               обновить только ноду, сохраняя Xray и геофайлы
   core-update --version latest  обновить Xray, сохраняя ноду и геофайлы
   geofiles --russia     обновить геофайлы (также --iran, --china)

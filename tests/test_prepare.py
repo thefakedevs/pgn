@@ -114,7 +114,7 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("h2c://127.0.0.1:10444", caddy)
         self.assertNotIn(self.values["API_KEY"], caddy + haproxy)
 
-    def test_maintenance_uses_same_tls_identity_and_no_new_network_listener(self):
+    def test_maintenance_uses_same_tls_identity_and_no_new_public_listener(self):
         self.use_existing_identity()
         pgn.prepare(self.root)
         before = (self.root / 'config/haproxy.cfg').read_text()
@@ -128,12 +128,12 @@ class PrepareTests(unittest.TestCase):
                                       if line.strip().startswith('bind ') and '/run/pgn/' not in line]
         self.assertEqual(network_binds(before), network_binds(after))
         self.assertIn('management /run/pgn/management.sock', after)
-        self.assertIn('serviced /run/pgn/maintenance.sock', after)
+        self.assertIn('serviced 127.0.0.1:62051 ssl', after)
         self.assertIn('alpn h2,http/1.1', after)
         self.assertIn('verify required', after)
         self.assertIn('verifyhost pg.node.example.net', after)
         self.assertNotIn('verify none', after)
-        self.assertNotIn('62051', after)
+        self.assertIn('127.0.0.1:62051:3000', (PROJECT / 'maintenance/compose.yml').read_text())
         self.assertEqual(cert, (self.root / 'state/node/certs/ssl_cert.pem').read_bytes())
         self.assertEqual(key, (self.root / 'state/node/certs/ssl_key.pem').read_bytes())
         self.assertEqual(cert + b'\n' + key, (self.root / 'state/maintenance/tls/management.pem').read_bytes())
