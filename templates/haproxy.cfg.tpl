@@ -21,9 +21,7 @@ frontend shared_443
     default_backend reality
 
 backend management
-    @@MANAGEMENT_SERVER@@
-
-@@MAINTENANCE_FRONTENDS@@
+    server node 127.0.0.1:62050
 
 backend reality
     server xray 127.0.0.1:10443 send-proxy-v2
