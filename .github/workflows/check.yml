@@ -23,3 +23,7 @@ jobs:
           python3 -m venv /tmp/pgn-test-venv
           /tmp/pgn-test-venv/bin/pip install h2==4.3.0
           sudo /tmp/pgn-test-venv/bin/python tests/ingress.py
+      - name: Real Go stdin core update and panel replay
+        run: |
+          /tmp/pgn-test-venv/bin/pip install pasarguard-node-bridge==0.9.4
+          sudo /tmp/pgn-test-venv/bin/python tests/stdin_updates.py

@@ -181,21 +181,50 @@ def snapshot(root, values, compose, directory):
 
 
 def test_candidate(container, image):
-    mounts = [m for m in container.get("Mounts", []) if m["Destination"] == "/var/lib/pg-node"]
-    if len(mounts) != 1 or mounts[0]["Type"] != "bind":
+    mounts = [m for m in container.get("Mounts", []) if m.get("Type") == "bind"]
+    states = [m for m in mounts if m["Destination"] == "/var/lib/pg-node"]
+    if len(states) != 1:
         raise MaintenanceError("Expected a persistent bind mount at /var/lib/pg-node")
-    state = Path(mounts[0]["Source"])
-    configs = list((state / "generated").glob("*.json"))
-    if not configs:
-        raise MaintenanceError("No generated Xray config to validate; connect the panel first")
-    command(["docker", "run", "--rm", "--network", "none", "--entrypoint", "/usr/local/bin/xray",
-             "--mount", f"type=bind,src={state},dst=/var/lib/pg-node,readonly", image,
-             "run", "-test", "-confdir", "/var/lib/pg-node/generated"])
+    state = Path(states[0]["Source"])
+    configs = list((state / "generated").rglob("*.json"))
+    args = ["docker", "run", "--rm", "--network", "none", "--entrypoint", "/usr/local/bin/xray",
+            "-e", "XRAY_LOCATION_ASSET=/usr/local/share/xray"]
+    for mount in mounts:
+        args += ["--mount", f"type=bind,src={mount['Source']},dst={mount['Destination']},readonly"]
+    if configs:
+        if len(configs) != 1:
+            raise MaintenanceError("Multiple generated Xray configs; refusing to guess the active one")
+        config = "/var/lib/pg-node/" + configs[0].relative_to(state).as_posix()
+        command(args + [image, "run", "-test", "-c", config])
+        return
+    # DEBUG=false Go nodes pass their generated JSON to Xray via stdin and do
+    # not save it. Inspect argv only; never read/drain the live stdin pipe.
+    identifier = container.get("Id", container.get("Name", ""))
+    if not identifier:
+        raise MaintenanceError("Cannot identify the running node")
+    pids = command(["docker", "exec", identifier, "pidof", "xray"]).split()
+    if len(pids) != 1 or not pids[0].isdigit():
+        raise MaintenanceError("Expected one running Xray process")
+    argv = command(["docker", "exec", identifier, "cat", f"/proc/{pids[0]}/cmdline"]).split("\0")
+    stdin = any(arg in {"-c", "-config"} and i+1 < len(argv) and argv[i+1] == "stdin:"
+                for i, arg in enumerate(argv)) or any(arg in {"-c=stdin:", "-config=stdin:"} for arg in argv)
+    if not stdin:
+        raise MaintenanceError("No saved Xray config and runtime does not use stdin")
+    # The full config is owned by the panel, not available in the stdin pipe.
+    # Smoke-test the new core and both database parsers without exposing users.
+    with tempfile.TemporaryDirectory(prefix=".pgn-check-", dir=state) as directory:
+        check = Path(directory) / "check.json"
+        write_json(check, {"outbounds": [{"tag": "direct", "protocol": "freedom"}],
+                          "routing": {"rules": [
+                              {"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"},
+                              {"type": "field", "domain": ["geosite:google"], "outboundTag": "direct"}]}})
+        command(args + ["--mount", f"type=bind,src={check},dst=/tmp/pgn-check.json,readonly",
+                        image, "run", "-test", "-c", "/tmp/pgn-check.json"])
 
 
 def wait_for_node(root, values, compose, expected_image):
-    # The panel supplies config again after reconnect. Verify both the worker
-    # process and the actual Xray child, not just an open TCP socket.
+    # The panel holds an update lease until the REST call returns; it replays
+    # Core config afterwards. Wait for the Go listener, not for the Xray child.
     deadline = time.monotonic() + 90
     stable = 0
     while time.monotonic() < deadline:
@@ -205,12 +234,18 @@ def wait_for_node(root, values, compose, expected_image):
             if c["State"].get("OOMKilled"):
                 raise MaintenanceError("Updated node was OOM-killed")
             if c["State"]["Running"] and c["Config"]["Image"] == expected_image:
-                result = subprocess.run(["docker", "exec", ids[0], "pidof", "xray"], capture_output=True)
-                stable = stable + 1 if result.returncode == 0 else 0
-                if stable >= 3:
+                env = dict(v.split("=", 1) for v in c["Config"].get("Env", []) if "=" in v)
+                port = int(env.get("SERVICE_PORT", "62050"))
+                listeners = command(["docker", "exec", ids[0], "sh", "-c",
+                                     "cat /proc/net/tcp; if [ -r /proc/net/tcp6 ]; then cat /proc/net/tcp6; fi"])
+                ready = any(len(parts) > 3 and parts[3] == "0A" and
+                            parts[1].rsplit(":", 1)[-1].upper() == f"{port:04X}"
+                            for parts in (line.split() for line in listeners.splitlines()))
+                stable = stable + 1 if ready else 0
+                if stable >= 2:
                     return
-        time.sleep(3)
-    raise MaintenanceError("Updated node did not recover its Xray process")
+        time.sleep(2)
+    raise MaintenanceError("Updated node management listener did not recover")
 
 
 def apply_candidate(root, values, compose, container, candidate, record, backup):
@@ -292,7 +327,7 @@ def update(root, args, values, compose):
     # Images and manifests are sufficient for rollback; do not accumulate build payloads.
     for name in ("xray", "geoip.dat", "geosite.dat", "Dockerfile", ".dockerignore"):
         (backup / name).unlink(missing_ok=True)
-    print(f"{args.command}: completed; node and Xray are running. Rollback: {backup}")
+    print(f"{args.command}: completed; node management is ready; panel can replay Xray config. Rollback: {backup}")
 
 
 def ensure_service(root, values, compose):
