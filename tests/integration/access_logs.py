@@ -15,6 +15,16 @@ ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("pgn", ROOT / "scripts/pgn.py")
 pgn = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pgn)
+# Only this isolated fixture uses public test credentials. Preserve diagnostics
+# here; production pgn deliberately suppresses connection strings in failures.
+original_run = pgn.run
+def fixture_run(*args, **kwargs):
+    try:
+        return original_run(*args, **kwargs)
+    except pgn.ConfigError as exc:
+        print(str(exc), flush=True)
+        raise
+pgn.run = fixture_run
 DB = "pgn-access-test-db"
 ADMIN = "postgres://postgres:test-password@localhost:55432/pgn"
 
@@ -85,7 +95,7 @@ def sql_checks(admin):
     # Seed an old partition directly, then verify real partman retention and premake.
     old = (now - timedelta(days=35)).replace(hour=0, minute=0, second=0, microsecond=0)
     admin.execute("SELECT partman.create_partition_time('pgn.access_logs', ARRAY[%s::timestamptz])", (old,))
-    partition = admin.execute("SELECT child_table FROM partman.show_partitions('pgn.access_logs') ORDER BY child_table LIMIT 1").fetchone()[0]
+    partition = sorted(admin.execute("SELECT * FROM partman.show_partitions('pgn.access_logs')").fetchall())[0][1]
     admin.execute("SELECT partman.run_maintenance('pgn.access_logs')")
     assert admin.execute("SELECT to_regclass(%s)", ('pgn.' + partition,)).fetchone()[0] is None
     assert admin.execute("SELECT count(*) FROM partman.show_partitions('pgn.access_logs')").fetchone()[0] >= 8
