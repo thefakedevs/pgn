@@ -55,6 +55,9 @@ def sql_checks(admin):
         assert cur.fetchone() == (2, 2, True)
         cur.execute("SELECT is_identity, identity_generation FROM information_schema.columns WHERE table_schema='pgn' AND table_name='access_logs' AND column_name='id'")
         assert cur.fetchone() == ('YES', 'ALWAYS')
+    # Run the documented example itself, including its CTAS row-lock query.
+    admin.execute((ROOT / "sql/process_batch.sql").read_text().replace(":batch_size", "500"))
+    assert admin.execute("SELECT count(*) FROM pgn.access_logs WHERE processed_at IS NULL").fetchone()[0] == 0
 
     # Out-of-order commits: allocate smaller ID but keep it invisible.
     a = psycopg.connect(ADMIN)

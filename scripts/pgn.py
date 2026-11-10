@@ -149,7 +149,7 @@ def run(args, *, capture=False, env=None):
     if result.returncode:
         if capture:
             # Callers use capture only with OpenSSL and non-secret Docker diagnostics.
-            details = (result.stderr or result.stdout or "").strip()
+            details = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
             raise ConfigError(f"Команда {Path(args[0]).name} завершилась с ошибкой: {details}")
         raise ConfigError(f"Команда {Path(args[0]).name} завершилась с кодом {result.returncode}.")
     return result.stdout if capture else ""
