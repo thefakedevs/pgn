@@ -9,6 +9,7 @@ import tempfile
 import time
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("pgn", ROOT / "scripts/pgn.py")
@@ -26,6 +27,7 @@ def fixture_run(*args, **kwargs):
 pgn.run = fixture_run
 DB = "pgn-access-test-db"
 ADMIN = "postgres://postgres:test-password@localhost:55432/pgn"
+INGEST = "postgres://pgn_ingest:test-ingest@localhost:55432/pgn"
 
 
 def run(*args):
@@ -42,6 +44,43 @@ def wait_for(check, description, timeout=90):
             pass
         time.sleep(1)
     raise AssertionError("Timed out: " + description)
+
+
+def apply_migrations(admin):
+    migrations = sorted((ROOT / "sql").glob("00*.sql"))
+    for migration in migrations:
+        if migration.name < "003_access_details.sql":
+            admin.execute(migration.read_text())
+    admin.execute("CREATE ROLE pgn_ingest LOGIN PASSWORD 'test-ingest'; GRANT USAGE ON SCHEMA pgn TO pgn_ingest; GRANT INSERT ON pgn.access_ingest TO pgn_ingest")
+    # Exercise a real upgrade with existing rows and INSERT-only privileges.
+    legacy = dict(event_time=datetime.now(timezone.utc).isoformat(), email="11",
+                  destination_host="legacy.example", destination_port=443,
+                  protocol="tcp", status="accepted", route="in -> direct", node_id="legacy-client")
+    insert = "INSERT INTO pgn.access_ingest SELECT * FROM jsonb_populate_recordset(NULL::pgn.access_ingest,%s)"
+    with psycopg.connect(INGEST) as writer:
+        writer.execute(insert, (Jsonb([legacy]),))
+    before = admin.execute("SELECT id,event_time,destination_host FROM pgn.access_logs WHERE node_id='legacy-client'").fetchone()
+    identity_sql = "SELECT 'pgn.access_ingest'::regclass::oid,'pgn.insert_access_log()'::regprocedure::oid,(SELECT oid FROM pg_trigger WHERE tgrelid='pgn.access_ingest'::regclass AND tgname='insert_access_log')"
+    identity = admin.execute(identity_sql).fetchone()
+    for migration in migrations:
+        if migration.name >= "003_access_details.sql":
+            admin.execute(migration.read_text())
+    assert admin.execute(identity_sql).fetchone() == identity
+    assert admin.execute("SELECT id,event_time,destination_host FROM pgn.access_logs WHERE node_id='legacy-client'").fetchone() == before
+    assert admin.execute("SELECT source_ip,outbound_tag,reason FROM pgn.access_logs WHERE node_id='legacy-client'").fetchone() == (None, None, None)
+    assert admin.execute("SELECT has_table_privilege('pgn_ingest','pgn.access_ingest','INSERT'),has_table_privilege('pgn_ingest','pgn.access_logs','SELECT')").fetchone() == (True, False)
+    # The sink uses the view's full row type: omitted keys in old buffered
+    # events must remain NULL, while new IPv4/IPv6 details reach the parent.
+    records = [legacy,
+               dict(legacy, source_ip="198.51.100.7", outbound_tag="direct", reason=None),
+               dict(legacy, source_ip="2001:db8::7", outbound_tag="blocked", reason="blocked by policy")]
+    with psycopg.connect(INGEST) as writer:
+        writer.execute(insert, (Jsonb(records),))
+    details = admin.execute("SELECT host(source_ip),outbound_tag,reason FROM pgn.access_logs WHERE node_id='legacy-client'").fetchall()
+    assert details.count((None, None, None)) == 2
+    assert ("198.51.100.7", "direct", None) in details
+    assert ("2001:db8::7", "blocked", "blocked by policy") in details
+    admin.execute("DELETE FROM pgn.access_logs WHERE node_id='legacy-client'")
 
 
 def sql_checks(admin):
@@ -119,9 +158,7 @@ def main():
             run("docker", "cp", DB + ":/certs/ca.crt", str(root / "ca.pem"))
             with psycopg.connect(ADMIN, autocommit=True) as admin:
                 admin.execute("CREATE SCHEMA partman; CREATE EXTENSION pg_partman SCHEMA partman")
-                for migration in sorted((ROOT / "sql").glob("00*.sql")):
-                    admin.execute(migration.read_text())
-                admin.execute("CREATE ROLE pgn_ingest LOGIN PASSWORD 'test-ingest'; GRANT USAGE ON SCHEMA pgn TO pgn_ingest; GRANT INSERT ON pgn.access_ingest TO pgn_ingest")
+                apply_migrations(admin)
                 sql_checks(admin)
 
             env = dict(NODE_DOMAIN="vpn.example.net", API_DOMAIN="pg.example.net", XHTTP_PATH="/assets/test/",
@@ -155,12 +192,22 @@ def main():
                 for name, status in (("access.log", "accepted"), ("error.log", "rejected")):
                     with (root / "state/node/logs" / name).open("a") as file:
                         for i in range(number):
-                            file.write(f"{stamp} from 127.0.0.1:1000 {status} tcp:example.org:443 [in -> direct] email: ci-{i}@example.org\n")
+                            source = "198.51.100.7:1000" if i % 2 == 0 else "[2001:db8::7]:1000"
+                            route = "in -> direct" if status == "accepted" else "in >> blocked"
+                            reason = "" if status == "accepted" else "blocked by policy "
+                            file.write(f"{stamp} from {source} {status} tcp:example.org:443 [{route}] {reason}email: ci-{i}@example.org\n")
             def count():
                 with psycopg.connect(ADMIN) as conn:
                     return conn.execute("SELECT count(*) FROM pgn.access_logs WHERE node_id='ci-node'").fetchone()[0]
             emit(10)
             wait_for(lambda: count() == 20, "first batch")
+            with psycopg.connect(ADMIN) as admin:
+                details = admin.execute("SELECT DISTINCT host(source_ip),outbound_tag,reason,status FROM pgn.access_logs WHERE node_id='ci-node'").fetchall()
+                assert set(details) == {
+                    (source, outbound, reason, status)
+                    for source in ("198.51.100.7", "2001:db8::7")
+                    for outbound, reason, status in (("direct", None, "accepted"), ("blocked", "blocked by policy", "rejected"))
+                }
             run("docker", "stop", DB)
             emit(25)
             time.sleep(5)
@@ -173,7 +220,7 @@ def main():
             assert count() == 70, "Unexpected duplicates in a cleanly interrupted batch"
             pgn.compose(root, dict(values, ACCESS_LOG_ENABLED="false"), "stop", "vector")
             assert any((root / "state/vector").iterdir()), "Persistent state was removed"
-            print("PostgreSQL, TLS, retention, SKIP LOCKED, batching and disk recovery: OK")
+            print("PostgreSQL upgrade, access details, TLS, retention, SKIP LOCKED, batching and disk recovery: OK")
         finally:
             # Runtime logs can include the test DSN, which contains test-only credentials.
             subprocess.run(["docker", "compose", "--project-directory", str(root), "--profile", "access-logs", "down"], capture_output=True)
