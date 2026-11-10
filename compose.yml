@@ -2,7 +2,7 @@ name: ${COMPOSE_PROJECT_NAME:-pgn}
 
 services:
   pg-node:
-    image: pasarguard/node:v0.5.6
+    image: pasarguard/node:v0.5.7
     restart: unless-stopped
     network_mode: host
     environment:
@@ -32,6 +32,8 @@ services:
       pgn.config-revision: ${PGN_CONFIG_REVISION:-manual}
     volumes:
       - ./config:/usr/local/etc/haproxy:ro
+      - ./state/maintenance/run:/run/pgn
+      - ./state/maintenance/tls:/etc/pgn/tls:ro
     logging: *logging
 
   caddy:

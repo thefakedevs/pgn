@@ -15,7 +15,7 @@ import tempfile
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-KEYS = {"NODE_DOMAIN", "API_DOMAIN", "XHTTP_PATH", "API_KEY", "COMPOSE_PROJECT_NAME"}
+KEYS = {"NODE_DOMAIN", "API_DOMAIN", "XHTTP_PATH", "API_KEY", "COMPOSE_PROJECT_NAME", "MAINTENANCE_ENABLED"}
 
 
 class ConfigError(Exception):
@@ -79,6 +79,10 @@ def validate(values):
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", project):
         raise ConfigError("COMPOSE_PROJECT_NAME: до 63 символов a-z, 0-9, _ и -; первый символ — буква или цифра.")
     values["COMPOSE_PROJECT_NAME"] = project
+    enabled = values.get("MAINTENANCE_ENABLED", "true").lower()
+    if enabled not in {"true", "false"}:
+        raise ConfigError("MAINTENANCE_ENABLED: допустимы true и false.")
+    values["MAINTENANCE_ENABLED"] = enabled
     return values
 
 
@@ -169,8 +173,19 @@ def ensure_certificate(root, domain):
 def render(root, values):
     replacements = {"API_DOMAIN": values["API_DOMAIN"], "NODE_DOMAIN": values["NODE_DOMAIN"],
                     "XHTTP_PATH": values["XHTTP_PATH"], "XHTTP_BASE": values["XHTTP_PATH"].rstrip("/")}
+    replacements["MANAGEMENT_SERVER"] = "server node 127.0.0.1:62050"
+    replacements["MAINTENANCE_FRONTENDS"] = ""
+    if values["MAINTENANCE_ENABLED"] == "true":
+        replacements["MANAGEMENT_SERVER"] = "server management /run/pgn/management.sock"
+        replacements["MAINTENANCE_FRONTENDS"] = (root / "templates/maintenance.cfg.tpl").read_text()
+        certs = root / "state/node/certs"
+        atomic_write(root / "state/maintenance/tls/management.pem",
+                     (certs / "ssl_cert.pem").read_text() + "\n" + (certs / "ssl_key.pem").read_text())
+        atomic_write(root / "state/maintenance/tls/node-ca.pem", (certs / "ssl_cert.pem").read_text(), 0o644)
     for name in ("haproxy.cfg", "Caddyfile"):
         text = (root / "templates" / (name + ".tpl")).read_text(encoding="utf-8")
+        # Expand the optional fragment before substituting its domain marker.
+        text = text.replace("@@MAINTENANCE_FRONTENDS@@", replacements["MAINTENANCE_FRONTENDS"])
         for key, value in replacements.items():
             text = text.replace("@@" + key + "@@", value)
         if "@@" in text:
@@ -184,6 +199,8 @@ def prepare(root):
         raise ConfigError("Установите OpenSSL: apt-get install openssl")
     # Validate an existing identity before changing anything else.
     cert_dir = root / "state/node/certs"
+    node_state = root / "state/node"
+    fresh_install = not any(p.is_file() for p in node_state.rglob("*"))
     if any((cert_dir / n).exists() for n in ("ssl_cert.pem", "ssl_key.pem")):
         check_certificate(cert_dir / "ssl_cert.pem", cert_dir / "ssl_key.pem", values["API_DOMAIN"])
     if not values["API_KEY"]:
@@ -194,24 +211,36 @@ def prepare(root):
         save_api_key(root, values["API_KEY"])
     else:
         os.chmod(root / ".env", 0o600)
+    if fresh_install and not (root / "config/node-runtime.compose.json").exists():
+        # Persistent marker survives prepare/check and failed first-up retries.
+        atomic_write(node_state / ".fresh-install.json", '{"geofiles": "russia", "status": "pending"}\n')
     ensure_certificate(root, values["API_DOMAIN"])
     render(root, values)
-    for directory in ("state/node/generated", "state/caddy/data", "state/caddy/config"):
+    for directory in ("state/node/generated", "state/caddy/data", "state/caddy/config",
+                      "state/maintenance/run", "state/maintenance/tls"):
         (root / directory).mkdir(parents=True, exist_ok=True)
+    os.chmod(root / "state/maintenance/run", 0o755)
     return values
 
 
 def compose(root, values, *args, capture=False):
     env = os.environ.copy()
     env.update(values)
+    env["PGN_ROOT"] = str(root.resolve())
     digest = hashlib.sha256()
-    for name in ("haproxy.cfg", "Caddyfile"):
-        path = root / "config" / name
+    for name in ("config/haproxy.cfg", "config/Caddyfile", "state/maintenance/tls/management.pem"):
+        path = root / name
         if path.exists():
             digest.update(name.encode() + b"\0" + path.read_bytes())
     env["PGN_CONFIG_REVISION"] = digest.hexdigest()
+    files = ["-f", str(root / "compose.yml")]
+    if values.get("MAINTENANCE_ENABLED") == "true":
+        files += ["-f", str(root / "maintenance/compose.yml")]
+    override = root / "config/node-runtime.compose.json"
+    if override.exists():
+        files += ["-f", str(override)]
     return run(["docker", "compose", "--project-directory", str(root),
-                "--env-file", str(root / ".env"), "-f", str(root / "compose.yml"), *args],
+                "--env-file", str(root / ".env"), *files, *args],
                env=env, capture=capture)
 
 
@@ -248,6 +277,7 @@ def show_info(root, values):
 Данные для панели PasarGuard
   Адрес:       {values['API_DOMAIN']}
   Порт:        443
+  API port:    443 (при MAINTENANCE_ENABLED=true)
   Протокол:    gRPC
   TLS:         включён
   API key:     {values['API_KEY']}
@@ -298,6 +328,12 @@ def main():
   status   показать состояние контейнеров
   logs     показать последние 100 строк логов каждого сервиса
   down     остановить контейнеры, сохранив .env и state/
+  maintenance-install  скачать готовый официальный API и подготовить образ
+  maintenance-status   показать состояние контейнера API
+  update               обновить только ноду, сохраняя Xray и геофайлы
+  core-update --version latest  обновить Xray, сохраняя ноду и геофайлы
+  geofiles --russia     обновить геофайлы (также --iran, --china)
+  restart              перезапустить только ноду
 
 Первый запуск:
   cp .env.example .env
@@ -310,9 +346,15 @@ def main():
     )
     parser.add_argument(
         "command", nargs="?", default="help", metavar="команда",
-        choices=("help", "prepare", "check", "up", "info", "status", "logs", "down"),
+        choices=("help", "prepare", "check", "up", "info", "status", "logs", "down",
+                 "maintenance-install", "maintenance-status", "update", "core-update", "geofiles", "restart"),
         help="команда (по умолчанию: help)",
     )
+    parser.add_argument("--version", default="latest", help="версия ноды/Xray для update/core-update")
+    parser.add_argument("--no-update-service", action="store_true", help=argparse.SUPPRESS)
+    region = parser.add_mutually_exclusive_group()
+    for name in ("iran", "russia", "china"):
+        region.add_argument("--" + name, dest="region", action="store_const", const=name)
     args = parser.parse_args()
     if args.command == "help":
         parser.print_help()
@@ -327,12 +369,25 @@ def main():
                 show_info(ROOT, prepare(ROOT))
                 return 0
             require_docker()
+            if args.command in {"maintenance-install", "maintenance-status", "update", "core-update", "geofiles", "restart"}:
+                from pgn_maintenance import execute, MaintenanceError
+                try:
+                    execute(ROOT, args, load_env(ROOT), compose)
+                except MaintenanceError as exc:
+                    raise ConfigError(str(exc)) from None
+                return 0
             if args.command in {"up", "check"}:
                 values = prepare(ROOT)
                 check_stack(ROOT, values)
                 if args.command == "check":
                     print("Compose, HAProxy и Caddy: конфигурация корректна. VPN-клиент не проверялся.")
                     return 0
+                from pgn_maintenance import ensure_service, initial_geofiles, MaintenanceError
+                try:
+                    ensure_service(ROOT, values, compose)
+                    initial_geofiles(ROOT, values, compose)
+                except (MaintenanceError, ValueError, KeyError) as exc:
+                    raise ConfigError(str(exc)) from None
                 compose(ROOT, values, "up", "-d")
                 compose(ROOT, values, "ps")
                 print("Контейнеры запущены. Дождитесь сертификата Caddy и подключения панели.\n")
