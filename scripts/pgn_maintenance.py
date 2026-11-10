@@ -295,6 +295,16 @@ def update(root, args, values, compose):
     print(f"{args.command}: completed; node and Xray are running. Rollback: {backup}")
 
 
+def ensure_service(root, values, compose):
+    """First up prepares the service image; later up reuses the cached image."""
+    if values.get("MAINTENANCE_ENABLED", "true") != "true":
+        return
+    result = subprocess.run(["docker", "image", "inspect", "local/pgn-maintenance:0.0.4"],
+                            capture_output=True, text=True)
+    if result.returncode:
+        install(root, values, compose)
+
+
 def install(root, values, compose):
     """Package an unchanged, checksum-verified official release binary."""
     import tarfile
@@ -333,7 +343,7 @@ def install(root, values, compose):
     # Do not start services or change .env during installation.
     enabled = dict(values, MAINTENANCE_ENABLED="true")
     compose(root, enabled, "build", "maintenance")
-    print("Official service image prepared. Set MAINTENANCE_ENABLED=true, run ./pgn up, and set API port=443 in the panel.")
+    print("Official service image prepared; pgn up starts it automatically. Panel API port: 443.")
 
 
 def execute(root, args, values, compose):

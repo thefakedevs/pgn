@@ -19,6 +19,19 @@ spec.loader.exec_module(m)
 
 
 class MaintenanceTests(unittest.TestCase):
+    def test_first_up_prepares_missing_service_but_reuses_cached_image(self):
+        for cached in [False, True]:
+            with self.subTest(cached=cached), patch.object(m.subprocess, 'run') as run, patch.object(m, 'install') as install:
+                run.return_value.returncode = 0 if cached else 1
+                root, compose = Path('/pgn'), unittest.mock.Mock()
+                m.ensure_service(root, {'MAINTENANCE_ENABLED': 'true'}, compose)
+                self.assertEqual(install.call_count, 0 if cached else 1)
+                run.assert_called_once()
+        with patch.object(m.subprocess, 'run') as run, patch.object(m, 'install') as install:
+            m.ensure_service(Path('/pgn'), {'MAINTENANCE_ENABLED': 'false'}, unittest.mock.Mock())
+            run.assert_not_called()
+            install.assert_not_called()
+
     def test_install_packages_the_unchanged_official_binary_without_starting_services(self):
         binary = b'\x7fELFofficial-fixture'
         buf = io.BytesIO()

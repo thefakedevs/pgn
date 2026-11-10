@@ -118,6 +118,8 @@ class PrepareTests(unittest.TestCase):
 
     def test_maintenance_uses_same_tls_identity_and_no_new_public_listener(self):
         self.use_existing_identity()
+        self.values['MAINTENANCE_ENABLED'] = 'false'
+        self.write_env()
         pgn.prepare(self.root)
         before = (self.root / 'config/haproxy.cfg').read_text()
         cert = (self.root / 'state/node/certs/ssl_cert.pem').read_bytes()
@@ -188,6 +190,7 @@ class PrepareTests(unittest.TestCase):
         values = pgn.load_env(self.root)
         self.assertEqual(values["NODE_DOMAIN"], "node.example.net")
         self.assertEqual(values["COMPOSE_PROJECT_NAME"], "pgn")
+        self.assertEqual(values["MAINTENANCE_ENABLED"], "true")
 
     def test_config_revision_changes_only_with_proxy_config(self):
         self.use_existing_identity()

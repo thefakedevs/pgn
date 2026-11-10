@@ -79,7 +79,7 @@ def validate(values):
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", project):
         raise ConfigError("COMPOSE_PROJECT_NAME: до 63 символов a-z, 0-9, _ и -; первый символ — буква или цифра.")
     values["COMPOSE_PROJECT_NAME"] = project
-    enabled = values.get("MAINTENANCE_ENABLED", "false").lower()
+    enabled = values.get("MAINTENANCE_ENABLED", "true").lower()
     if enabled not in {"true", "false"}:
         raise ConfigError("MAINTENANCE_ENABLED: допустимы true и false.")
     values["MAINTENANCE_ENABLED"] = enabled
@@ -382,8 +382,9 @@ def main():
                 if args.command == "check":
                     print("Compose, HAProxy и Caddy: конфигурация корректна. VPN-клиент не проверялся.")
                     return 0
-                from pgn_maintenance import initial_geofiles, MaintenanceError
+                from pgn_maintenance import ensure_service, initial_geofiles, MaintenanceError
                 try:
+                    ensure_service(ROOT, values, compose)
                     initial_geofiles(ROOT, values, compose)
                 except (MaintenanceError, ValueError, KeyError) as exc:
                     raise ConfigError(str(exc)) from None
