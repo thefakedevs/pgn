@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
+import tarfile
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -18,6 +19,34 @@ spec.loader.exec_module(m)
 
 
 class MaintenanceTests(unittest.TestCase):
+    def test_install_packages_the_unchanged_official_binary_without_starting_services(self):
+        binary = b'\x7fELFofficial-fixture'
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w:gz') as t:
+            entry = tarfile.TarInfo('node-serviced')
+            entry.size = len(binary)
+            t.addfile(entry, io.BytesIO(binary))
+        archive = buf.getvalue()
+        name = 'node-serviced_0.0.4_Linux_x86_64.tar.gz'
+        checksum = (hashlib.sha256(archive).hexdigest() + '  ' + name + '\n').encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(m.platform, 'machine', return_value='x86_64'), \
+                    patch.object(m, 'release', return_value={}), \
+                    patch.object(m, 'asset', side_effect=[archive, checksum]), patch('builtins.print'):
+                compose = unittest.mock.Mock()
+                m.install(root, {'MAINTENANCE_ENABLED': 'false'}, compose)
+            self.assertEqual((root / 'state/maintenance/image/node-serviced').read_bytes(), binary)
+            self.assertEqual(compose.call_args.args[-2:], ('build', 'maintenance'))
+            self.assertEqual(compose.call_args.args[1]['MAINTENANCE_ENABLED'], 'true')
+            self.assertFalse((root / '.env').exists())
+            self.assertNotIn('golang', (root / 'state/maintenance/image/Dockerfile').read_text())
+            with patch.object(m.platform, 'machine', return_value='x86_64'), \
+                    patch.object(m, 'release', return_value={}), \
+                    patch.object(m, 'asset', side_effect=[archive, b'0' * 64 + b'  ' + name.encode()]):
+                with self.assertRaisesRegex(m.MaintenanceError, 'checksum mismatch'):
+                    m.install(root, {}, unittest.mock.Mock())
+
     def test_each_update_changes_only_the_requested_component(self):
         for operation in ['update', 'core-update', 'geofiles']:
             with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmp:
