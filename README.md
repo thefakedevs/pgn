@@ -63,6 +63,7 @@ XHTTP_PATH=/assets/your-path-from-panel/
 |---|---|
 | Адрес | `API_DOMAIN` |
 | Порт | `443` |
+| API port для кнопок обновления | `443`, после установки maintenance-сервиса |
 | Протокол | gRPC |
 | TLS | включён |
 | API key | UUID из `.env` / вывода скрипта |
@@ -99,6 +100,11 @@ sudo ./pgn info     # повторно показать данные панел�
 sudo ./pgn status   # состояние контейнеров
 sudo ./pgn logs     # последние 100 строк логов каждого сервиса
 sudo ./pgn down     # остановить и удалить контейнеры; сохранить state и .env
+sudo ./pgn maintenance-install  # установить API обновлений на Unix-сокете
+sudo ./pgn maintenance-status   # состояние API обновлений
+sudo ./pgn update               # обновить ноду, сохранив Xray и геофайлы
+sudo ./pgn core-update --version latest  # обновить Xray
+sudo ./pgn geofiles --russia     # геофайлы; также --iran и --china
 ```
 
 `./pgn`, `./pgn help` и `./pgn --help` выводят одну и ту же справку.
@@ -152,3 +158,109 @@ python3 -m unittest discover -s tests -v
 ```
 
 Источники: [параметры PGN](https://docs.pasarguard.org/en/node/configuration/), [проект PGN](https://github.com/PasarGuard/node), [Caddy ACME](https://caddyserver.com/docs/caddyfile/directives/tls), [проверка Caddy](https://caddyserver.com/docs/command-line#caddy-validate).
+
+## Кнопки Update Core, Update Geofiles и Update Node
+
+Для кнопок нужен отдельный host-сервис. В `maintenance/node-serviced/` включён
+официальный [PasarGuard/node-serviced v0.0.4](https://github.com/PasarGuard/node-serviced/tree/v0.0.4)
+с адаптацией транспорта под Unix-сокет. Лицензия GPL-3.0 и список изменений находятся
+рядом с исходниками. Сам сервис не слушает TCP/UDP и не запускает upstream installer.
+Команды выполняет локальный `pgn`, который сохраняет существующую компоновку проекта.
+
+Включение — отдельное действие администратора. По умолчанию
+`MAINTENANCE_ENABLED=false`; обновление исходников само по себе ничего не устанавливает.
+Выполняйте следующие команды на сервере только после согласованного окна применения:
+
+```sh
+sudo ./pgn prepare  # для новой установки; не теряйте API_KEY и сертификаты при переносе
+sudo ./pgn maintenance-install
+# В существующем .env установите MAINTENANCE_ENABLED=true.
+sudo ./pgn check
+sudo ./pgn up
+```
+
+Установщик собирает host-бинарник через локальный Go 1.25.5+ либо временный контейнер
+`golang:1.25.5-bookworm` и устанавливает systemd unit
+`pgn-<COMPOSE_PROJECT_NAME>-maintenance.service`. Путь проекта должен быть постоянным,
+без пробелов; сервис вызывает `pgn` из этого каталога. Сборка скачивает Go-модуль,
+контейнер сборки удаляется после завершения. Образ сборки может быть удалён отдельно
+после установки, если больше не нужен. Установщик не редактирует `.env` и не
+перезапускает ноду или прокси: включение маршрута выполняет последующий `pgn up`.
+
+В карточке существующей ноды установите **API port = 443**. Адрес, основной порт
+`443`, gRPC, API key и публичный сертификат остаются прежними. Администраторский
+ключ панели для этого сервису не требуется.
+
+Запросы идут так:
+
+```text
+существующий API_DOMAIN:443
+  → HAProxy: прежний выбор по SNI
+    → Unix management.sock: TLS с прежним сертификатом ноды, HTTP/2 + HTTP/1.1
+      ├─ gRPC → прежняя TLS-нода 127.0.0.1:62050, с проверкой сертификата
+      └─ POST /node/{update,core_update,geofiles,hard_reset}
+         → Unix maintenance.sock → node-serviced → локальная команда pgn
+```
+
+`GET /` на адресе управления — проверка сервиса с тем же API-ключом.
+Все maintenance-запросы требуют `x-api-key`; без ключа и с неверным ключом — `401`.
+Параллельная maintenance-операция получает `409`. Остальные HTTP-пути на адресе
+управления получают `404`. Домены, публичные listeners, сайт, Reality и XHTTP
+не меняются. Новых сетевых listeners для API нет даже на loopback: оба новых
+соединения используют файлы Unix-сокетов. Доступ к maintenance-сокету — `0660`,
+по группе HAProxy. Приватные ключи и API-ключ не записываются в репозиторий;
+service.env доступен только root и не монтируется в Caddy.
+
+Обновления выполняются только после команды или нажатия кнопки:
+
+- **Update Node** скачивает стабильный релиз официальной ноды и сохраняет
+  установленный Xray и обе базы геоданных. CLI также принимает `update --version vX.Y.Z`.
+- **Update Core** скачивает выбранный стабильный Xray, проверяет SHA256 архива
+  по официальному `.dgst` и сохраняет версию ноды и геофайлы.
+- **Update Geofiles** использует те же региональные источники Iran/Russia/China,
+  что официальный `pg-node.sh`, сохраняя версию ноды и Xray.
+
+Из рабочего контейнера сохраняются бинарник и геофайлы; собирается отдельный образ
+с обычным тегом. Сначала кандидат проверяется изолированным `xray run -test` на
+текущей сгенерированной конфигурации. Только затем пересоздаётся **pg-node**,
+с `--no-deps`: сервисы сайта и прокси не затрагиваются. Подтверждается восстановление
+процесса Xray; при сбое используется сохранённый образ отката. API key, сертификаты,
+Compose project и bind mounts сохраняются. Если не удалось определить исходную
+версию ноды или нет сгенерированного JSON, обновление останавливается до замены
+контейнера. Это рассчитано на Xray-ноды с `/var/lib/pg-node` как постоянным bind mount.
+
+Рабочий образ задаётся локальным `config/node-runtime.compose.json`; команды `pgn`
+автоматически подключают его поверх `compose.yml`. Используйте `pgn` и после
+обновления: голый `docker compose up` без override вернёт образ из базового Compose.
+Манифесты и файлы отката находятся в `state/maintenance/backups/`; сами старые образы
+сохраняются с тегом `local/pgn-node:rollback-*`. Автоматического Docker prune нет.
+Обновление пересоздаёт ноду, поэтому краткое прерывание соединений ожидаемо.
+
+Сервис systemd останавливается отдельно от контейнеров:
+
+```sh
+sudo systemctl stop pgn-pgn-maintenance.service  # замените pgn на свой Compose project
+```
+
+Для полного отключения установите `MAINTENANCE_ENABLED=false`, примените `pgn up`
+и выключите соответствующий systemd unit. Маршрут вернётся к прежнему gRPC passthrough.
+`pgn down` сохраняет state и не удаляет host-сервис.
+
+### Проверки разработки
+
+```sh
+python3 -m unittest discover -s tests -v
+(cd maintenance/node-serviced && go test -race ./...)
+# На изолированном Linux runner с Docker, не на production-ноде:
+(cd maintenance/node-serviced && sudo env PATH="$PATH" \
+  PGN_TEST_HAPROXY_IMAGE=haproxy:3.2.24-alpine go test -run TestHAProxySharedTLSIngress -v)
+```
+
+CI проверяет оба режима шаблонов реальными HAProxy/Caddy, а также общий TLS ingress
+с HTTP/1.1 maintenance, HTTP/2 gRPC, авторизацией и прежним SNI-маршрутом сайта.
+Ingress fixture использует официальный образ HAProxy с `--network none`, только
+Unix-сокеты и фиктивные команды. Production-ноды в этих тестах не участвуют.
+
+Компоновка Vega с панелью и отдельным ingress отличается от стандартного PGN.
+Не запускайте этот Compose поверх неё: интеграция её существующих маршрутов требует
+отдельного плана применения. Изменение репозитория не развёртывает сервисы ни на одной ноде.

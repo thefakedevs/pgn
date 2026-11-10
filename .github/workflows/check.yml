@@ -1,0 +1,34 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache-dependency-path: maintenance/node-serviced/go.sum
+      - name: Python safety and rollback tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Go tests and race detector
+        working-directory: maintenance/node-serviced
+        run: |
+          test -z "$(gofmt -l .)"
+          go test -race -count=1 ./...
+      - name: Validate both generated configurations
+        run: |
+          cp .env.example .env
+          sed -i 's/vpn.example.com/node.example.net/g; s@/assets/change-me/@/assets/fixture/@' .env
+          sudo ./pgn check
+          sed -i 's/MAINTENANCE_ENABLED=false/MAINTENANCE_ENABLED=true/' .env
+          sudo ./pgn check
+      - name: Shared TLS ingress with the production HAProxy image
+        working-directory: maintenance/node-serviced
+        run: |
+          docker pull haproxy:3.2.24-alpine
+          sudo env PATH="$PATH" GOCACHE="$(go env GOCACHE)" GOPATH="$(go env GOPATH)" PGN_TEST_HAPROXY_IMAGE=haproxy:3.2.24-alpine go test -count=1 -v -run TestHAProxySharedTLSIngress

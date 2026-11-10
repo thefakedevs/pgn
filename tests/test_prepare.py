@@ -114,6 +114,42 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("h2c://127.0.0.1:10444", caddy)
         self.assertNotIn(self.values["API_KEY"], caddy + haproxy)
 
+    def test_maintenance_uses_same_tls_identity_and_no_new_network_listener(self):
+        self.use_existing_identity()
+        pgn.prepare(self.root)
+        before = (self.root / 'config/haproxy.cfg').read_text()
+        cert = (self.root / 'state/node/certs/ssl_cert.pem').read_bytes()
+        key = (self.root / 'state/node/certs/ssl_key.pem').read_bytes()
+        self.values['MAINTENANCE_ENABLED'] = 'true'
+        self.write_env()
+        pgn.prepare(self.root)
+        after = (self.root / 'config/haproxy.cfg').read_text()
+        network_binds = lambda text: [line.strip() for line in text.splitlines()
+                                      if line.strip().startswith('bind ') and '/run/pgn/' not in line]
+        self.assertEqual(network_binds(before), network_binds(after))
+        self.assertIn('management /run/pgn/management.sock', after)
+        self.assertIn('serviced /run/pgn/maintenance.sock', after)
+        self.assertIn('alpn h2,http/1.1', after)
+        self.assertIn('verify required', after)
+        self.assertIn('verifyhost pg.node.example.net', after)
+        self.assertNotIn('verify none', after)
+        self.assertNotIn('62051', after)
+        self.assertEqual(cert, (self.root / 'state/node/certs/ssl_cert.pem').read_bytes())
+        self.assertEqual(key, (self.root / 'state/node/certs/ssl_key.pem').read_bytes())
+        self.assertEqual(cert + b'\n' + key, (self.root / 'state/maintenance/tls/management.pem').read_bytes())
+        self.assertEqual((self.root / 'state/maintenance/tls/management.pem').stat().st_mode & 0o777, 0o600)
+
+    def test_compose_includes_runtime_image_override_without_touching_tracked_compose(self):
+        self.use_existing_identity()
+        values = pgn.prepare(self.root)
+        before = (self.root / 'compose.yml').read_bytes()
+        override = self.root / 'config/node-runtime.compose.json'
+        override.write_text('{"services":{"pg-node":{"image":"local/pgn-node:fixture"}}}')
+        with patch.object(pgn, 'run', return_value='') as run:
+            pgn.compose(self.root, values, 'up', '-d', '--no-deps', 'pg-node')
+            self.assertIn(str(override), run.call_args.args[0])
+        self.assertEqual(before, (self.root / 'compose.yml').read_bytes())
+
     def test_invalid_values_are_rejected_before_generation(self):
         cases = [
             ("NODE_DOMAIN", "vpn.example.com"),
