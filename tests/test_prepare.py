@@ -179,6 +179,31 @@ class PrepareTests(unittest.TestCase):
         self.assertIn(values["API_KEY"], text)
         self.assertNotIn("PRIVATE KEY", text)
 
+    def test_access_logging_preserves_identity_and_generates_no_dsn(self):
+        self.use_existing_identity()
+        cert = self.root / "state/node/certs/ssl_cert.pem"
+        before = cert.read_bytes()
+        self.values.update(ACCESS_LOG_ENABLED="true", ACCESS_LOG_NODE_ID="node-1",
+                           ACCESS_LOG_POSTGRES_DSN="postgres://user:secret@db.example.net/logs?sslmode=verify-full")
+        self.write_env()
+        values = pgn.prepare(self.root)
+        self.assertEqual(cert.read_bytes(), before)
+        config = self.root / "config/vector.yaml"
+        self.assertNotIn("user:secret", config.read_text())
+        self.assertIn("${ACCESS_LOG_POSTGRES_DSN}", config.read_text())
+        self.assertTrue((self.root / "state/vector").is_dir())
+        with patch.object(pgn, "run", return_value="") as run:
+            pgn.compose(self.root, values, "up", "-d")
+            initial = run.call_args.kwargs["env"]["PGN_VECTOR_REVISION"]
+            (self.root / "config/postgres-ca.pem").write_text("changed CA")
+            pgn.compose(self.root, values, "up", "-d")
+            self.assertNotEqual(initial, run.call_args.kwargs["env"]["PGN_VECTOR_REVISION"])
+        self.values["ACCESS_LOG_ENABLED"] = "false"
+        self.write_env()
+        pgn.prepare(self.root)
+        self.assertEqual(cert.read_bytes(), before)
+        self.assertTrue((self.root / "state/vector").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

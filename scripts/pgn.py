@@ -13,9 +13,14 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from urllib.parse import parse_qsl, urlsplit, urlencode, urlunsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 KEYS = {"NODE_DOMAIN", "API_DOMAIN", "XHTTP_PATH", "API_KEY", "COMPOSE_PROJECT_NAME"}
+ACCESS_DEFAULTS = {"ACCESS_LOG_ENABLED": "false", "ACCESS_LOG_POSTGRES_DSN": "",
+                   "ACCESS_LOG_NODE_ID": "", "ACCESS_LOG_BUFFER_BYTES": "1073741824",
+                   "ACCESS_LOG_POSTGRES_CA_FILE": ""}
+KEYS.update(ACCESS_DEFAULTS)
 
 
 class ConfigError(Exception):
@@ -79,6 +84,31 @@ def validate(values):
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", project):
         raise ConfigError("COMPOSE_PROJECT_NAME: до 63 символов a-z, 0-9, _ и -; первый символ — буква или цифра.")
     values["COMPOSE_PROJECT_NAME"] = project
+    for name, default in ACCESS_DEFAULTS.items():
+        values.setdefault(name, default)
+    if values["ACCESS_LOG_ENABLED"] not in {"true", "false"}:
+        raise ConfigError("ACCESS_LOG_ENABLED: допустимы true и false.")
+    if values["ACCESS_LOG_ENABLED"] == "true":
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", values["ACCESS_LOG_NODE_ID"]):
+            raise ConfigError("ACCESS_LOG_NODE_ID: требуется стабильный ID (1–128 символов A-Z, a-z, 0-9, _, ., :, -).")
+        size = values["ACCESS_LOG_BUFFER_BYTES"]
+        if not size.isdecimal() or len(size) > 19 or not 268435488 <= int(size) <= 2**63 - 1:
+            raise ConfigError("ACCESS_LOG_BUFFER_BYTES: целое число от 268435488 до 9223372036854775807.")
+        try:
+            uri = urlsplit(values["ACCESS_LOG_POSTGRES_DSN"])
+            options = parse_qsl(uri.query, keep_blank_values=True)
+            if (any(not 33 <= ord(ch) <= 126 for ch in values["ACCESS_LOG_POSTGRES_DSN"])
+                    or uri.scheme not in {"postgres", "postgresql"} or not uri.hostname
+                    or not uri.path.strip("/") or uri.fragment or ':' == uri.netloc[-1:]
+                    or [v for k, v in options if k == "sslmode"] != ["verify-full"]
+                    or any(k.lower() in {"host", "hostaddr", "sslmode", "ssl-mode", "sslrootcert", "ssl-root-cert"}
+                           and k != "sslmode" for k, _ in options)
+                    or len({k for k, _ in options}) != len(options)):
+                raise ValueError
+            if uri.port == 0:  # Also validates optional numeric port without exposing the URI.
+                raise ValueError
+        except (ValueError, TypeError):
+            raise ConfigError("ACCESS_LOG_POSTGRES_DSN: нужен PostgreSQL URI с БД и sslmode=verify-full; CA задаётся отдельным параметром.") from None
     return values
 
 
@@ -120,8 +150,8 @@ def run(args, *, capture=False, env=None):
         raise ConfigError(f"Не найдена команда: {args[0]}") from None
     if result.returncode:
         if capture:
-            # Callers use capture only with OpenSSL and non-secret Docker diagnostics.
-            details = (result.stderr or result.stdout or "").strip()
+            # Compose catches this error before displaying any potentially secret output.
+            details = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
             raise ConfigError(f"Команда {Path(args[0]).name} завершилась с ошибкой: {details}")
         raise ConfigError(f"Команда {Path(args[0]).name} завершилась с кодом {result.returncode}.")
     return result.stdout if capture else ""
@@ -196,6 +226,26 @@ def prepare(root):
         os.chmod(root / ".env", 0o600)
     ensure_certificate(root, values["API_DOMAIN"])
     render(root, values)
+    if values["ACCESS_LOG_ENABLED"] == "true":
+        ca = values["ACCESS_LOG_POSTGRES_CA_FILE"]
+        if ca:
+            source = Path(ca)
+            if not source.is_absolute():
+                source = root / source
+            try:
+                ca_text = source.read_text(encoding="ascii")
+            except (OSError, UnicodeError):
+                raise ConfigError("ACCESS_LOG_POSTGRES_CA_FILE: не удалось прочитать PEM CA.") from None
+            if "-----BEGIN CERTIFICATE-----" not in ca_text:
+                raise ConfigError("ACCESS_LOG_POSTGRES_CA_FILE: требуется PEM CA.")
+        else:
+            ca_text = "# System trust store is used when no custom CA is configured.\n"
+        atomic_write(root / "config/postgres-ca.pem", ca_text, 0o644)
+        vector_config = (root / "templates/vector.yaml.tpl").read_text(encoding="utf-8")
+        vector_config = vector_config.replace("@@ACCESS_LOG_BUFFER_BYTES@@", str(int(values["ACCESS_LOG_BUFFER_BYTES"])))
+        atomic_write(root / "config/vector.yaml", vector_config)
+        (root / "state/vector").mkdir(parents=True, exist_ok=True)
+        (root / "state/node/logs").mkdir(parents=True, exist_ok=True)
     for directory in ("state/node/generated", "state/caddy/data", "state/caddy/config"):
         (root / directory).mkdir(parents=True, exist_ok=True)
     return values
@@ -204,15 +254,37 @@ def prepare(root):
 def compose(root, values, *args, capture=False):
     env = os.environ.copy()
     env.update(values)
+    env["COMPOSE_PROFILES"] = ""
+    if values.get("ACCESS_LOG_POSTGRES_CA_FILE") and values.get("ACCESS_LOG_POSTGRES_DSN"):
+        uri = urlsplit(values["ACCESS_LOG_POSTGRES_DSN"])
+        env["ACCESS_LOG_POSTGRES_DSN"] = urlunsplit(uri._replace(
+            query=urlencode(parse_qsl(uri.query) + [("sslrootcert", "/etc/vector/postgres-ca.pem")], safe="/")))
+    # Container operations must still see a previously enabled service after disabling it.
+    profile = values.get("ACCESS_LOG_ENABLED") == "true" or (args and args[0] in {"ps", "logs", "down", "stop"})
+    vector_path = root / "config/vector.yaml"
+    env["PGN_VECTOR_REVISION"] = hashlib.sha256(
+        vector_path.read_bytes() + (root / "config/postgres-ca.pem").read_bytes()
+        if vector_path.exists() else b"").hexdigest()
     digest = hashlib.sha256()
     for name in ("haproxy.cfg", "Caddyfile"):
         path = root / "config" / name
         if path.exists():
             digest.update(name.encode() + b"\0" + path.read_bytes())
     env["PGN_CONFIG_REVISION"] = digest.hexdigest()
-    return run(["docker", "compose", "--project-directory", str(root),
-                "--env-file", str(root / ".env"), "-f", str(root / "compose.yml"), *args],
-               env=env, capture=capture)
+    try:
+        output = run(["docker", "compose", "--project-directory", str(root),
+                      "--env-file", str(root / ".env"), "-f", str(root / "compose.yml"),
+                      *(["--profile", "access-logs"] if profile else []), *args], env=env, capture=True)
+    except ConfigError:
+        # Docker/Vector errors may echo connection strings; never forward raw diagnostics.
+        raise ConfigError("Docker Compose: команда завершилась с ошибкой. Проверьте конфигурацию и локальные логи сервисов (могут содержать секреты).") from None
+    if capture:
+        return output
+    for secret in (values.get("ACCESS_LOG_POSTGRES_DSN"), env.get("ACCESS_LOG_POSTGRES_DSN")):
+        if secret:
+            output = output.replace(secret, "[REDACTED]")
+    print(output, end="")
+    return ""
 
 
 def require_docker():
@@ -236,6 +308,10 @@ def check_stack(root, values):
             "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg")
     compose(root, values, "run", "--rm", "--no-deps", "-T", "--entrypoint", "caddy",
             "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile")
+    if values["ACCESS_LOG_ENABLED"] == "true":
+        for arguments in (("validate", "--no-environment"), ("test",)):
+            compose(root, values, "run", "--rm", "--no-deps", "-T", "vector",
+                    *arguments, "/etc/vector/vector.yaml")
 
 
 def show_info(root, values):
@@ -292,7 +368,7 @@ def main():
         epilog="""Команды:
   help     показать эту справку
   prepare  создать конфиги, API-ключ и сертификат; вывести данные панели
-  check    подготовить и проверить Compose, HAProxy и Caddy
+  check    проверить Compose, HAProxy, Caddy и опциональный Vector
   up       подготовить, проверить и запустить контейнеры
   info     показать данные подключения ноды к панели
   status   показать состояние контейнеров
@@ -331,8 +407,11 @@ def main():
                 values = prepare(ROOT)
                 check_stack(ROOT, values)
                 if args.command == "check":
-                    print("Compose, HAProxy и Caddy: конфигурация корректна. VPN-клиент не проверялся.")
+                    components = "Compose, HAProxy, Caddy" + (", Vector" if values["ACCESS_LOG_ENABLED"] == "true" else "")
+                    print(f"{components}: конфигурация корректна. VPN-клиент и доступность БД не проверялись.")
                     return 0
+                if values["ACCESS_LOG_ENABLED"] == "false":
+                    compose(ROOT, values, "stop", "vector")
                 compose(ROOT, values, "up", "-d")
                 compose(ROOT, values, "ps")
                 print("Контейнеры запущены. Дождитесь сертификата Caddy и подключения панели.\n")
