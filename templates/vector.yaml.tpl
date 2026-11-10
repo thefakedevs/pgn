@@ -13,7 +13,8 @@ transforms:
   access_candidates:
     type: filter
     inputs: [xray]
-    condition: 'match(string!(.message), r"\b(?:accepted|rejected)\b")'
+    condition: |
+      match(string!(.message), r'\b(?:accepted|rejected)\b')
   parse_access:
     type: remap
     inputs: [access_candidates]
