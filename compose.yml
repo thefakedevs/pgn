@@ -12,6 +12,8 @@ services:
       ACCESS_LOG_POSTGRES_DSN: ${ACCESS_LOG_POSTGRES_DSN:-postgres://disabled@localhost/disabled?sslmode=verify-full}
       ACCESS_LOG_NODE_ID: ${ACCESS_LOG_NODE_ID:-disabled}
       ACCESS_LOG_BUFFER_BYTES: ${ACCESS_LOG_BUFFER_BYTES:-1073741824}
+      # Vector >=0.57 requires explicit opt-in for the DSN reference in our static config.
+      VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION: "true"
       TZ: UTC
     labels:
       pgn.vector-revision: ${PGN_VECTOR_REVISION:-manual}

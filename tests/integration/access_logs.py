@@ -1,7 +1,6 @@
 """Linux/Docker end-to-end checks. Uses an isolated temporary Compose project."""
 from datetime import datetime, timedelta, timezone
 import importlib.util
-import json
 import os
 from pathlib import Path
 import shutil
@@ -179,6 +178,11 @@ def main():
             # Runtime logs can include the test DSN, which contains test-only credentials.
             subprocess.run(["docker", "compose", "--project-directory", str(root), "--profile", "access-logs", "down"], capture_output=True)
             subprocess.run(["docker", "rm", "-f", DB], capture_output=True)
+            # Vector runs as root to read node-owned logs. Return only this
+            # disposable fixture's bind-mounted state to the runner for cleanup.
+            subprocess.run(["docker", "run", "--rm", "--entrypoint", "chown",
+                            "-v", str(root) + ":/fixture", "timberio/vector:0.61.0-debian",
+                            "-R", f"{os.getuid()}:{os.getgid()}", "/fixture"], capture_output=True)
 
 
 if __name__ == "__main__":

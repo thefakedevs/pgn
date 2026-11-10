@@ -148,7 +148,7 @@ def run(args, *, capture=False, env=None):
         raise ConfigError(f"Не найдена команда: {args[0]}") from None
     if result.returncode:
         if capture:
-            # Callers use capture only with OpenSSL and non-secret Docker diagnostics.
+            # Compose catches this error before displaying any potentially secret output.
             details = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
             raise ConfigError(f"Команда {Path(args[0]).name} завершилась с ошибкой: {details}")
         raise ConfigError(f"Команда {Path(args[0]).name} завершилась с кодом {result.returncode}.")
@@ -366,7 +366,7 @@ def main():
         epilog="""Команды:
   help     показать эту справку
   prepare  создать конфиги, API-ключ и сертификат; вывести данные панели
-  check    подготовить и проверить Compose, HAProxy и Caddy
+  check    проверить Compose, HAProxy, Caddy и опциональный Vector
   up       подготовить, проверить и запустить контейнеры
   info     показать данные подключения ноды к панели
   status   показать состояние контейнеров
@@ -405,7 +405,8 @@ def main():
                 values = prepare(ROOT)
                 check_stack(ROOT, values)
                 if args.command == "check":
-                    print("Compose, HAProxy и Caddy: конфигурация корректна. VPN-клиент не проверялся.")
+                    components = "Compose, HAProxy, Caddy" + (", Vector" if values["ACCESS_LOG_ENABLED"] == "true" else "")
+                    print(f"{components}: конфигурация корректна. VPN-клиент и доступность БД не проверялись.")
                     return 0
                 if values["ACCESS_LOG_ENABLED"] == "false":
                     compose(ROOT, values, "stop", "vector")

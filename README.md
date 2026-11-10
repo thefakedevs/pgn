@@ -48,7 +48,7 @@ XHTTP_PATH=/assets/your-path-from-panel/
 1. Проверяет `.env` и локальный Docker.
 2. Генерирует недостающий API-ключ и самоподписанный сертификат API с SAN для `API_DOMAIN` (RSA 3072, 10 лет).
 3. Формирует `config/haproxy.cfg` и `config/Caddyfile` из шаблонов.
-4. Проверяет Compose, HAProxy и Caddy их собственными командами проверки.
+4. Проверяет Compose, HAProxy и Caddy их собственными командами проверки; при включении логов также проверяет Vector.
 5. Запускает контейнеры и выводит данные для панели, включая публичный сертификат API.
 
 Проверки HAProxy и Caddy используют временные контейнеры из тех же образов. Docker при необходимости скачает образы. Проверка синтаксиса не подтверждает DNS, выдачу публичного сертификата или работоспособность VPN-клиента.
@@ -239,6 +239,10 @@ sudo docker compose --profile access-logs run --rm --no-deps vector validate /et
 `sslrootcert=/etc/vector/postgres-ca.pem` через защищённое окружение Docker Compose;
 обычные команды `./pgn` добавляют этот параметр сами. Sink healthcheck выполняет
 `SELECT 1`; проверяйте приём отдельно запросом к `pgn.access_logs` от владельца БД.
+Compose явно разрешает подстановку окружения Vector для ссылки на DSN в статическом
+шаблоне (`VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true`, требуется с Vector 0.57).
+Секрет не записывается в генерируемый YAML; не публикуйте `docker inspect` и вывод
+прямого `docker compose config`, поскольку они содержат окружение контейнера.
 
 Сохраняются `event_time` (`timestamptz`), `email`, `destination_host` (домен/IPv4/IPv6),
 `destination_port`, `protocol`, `status`, `route` и `node_id`. Протокол — `tcp`/`udp`
@@ -339,6 +343,7 @@ state/caddy/             # ACME и сертификаты сайта, исклю
 ```
 
 В Compose используются `pasarguard/node:latest`, `haproxy:latest` и `caddy:latest`.
+Опциональный сервис логов использует фиксированный `timberio/vector:0.61.0-debian`.
 Обновления выполняются вручную. Сохраните `.env` и `state/`, затем:
 
 ```sh
