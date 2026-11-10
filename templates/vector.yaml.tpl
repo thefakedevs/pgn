@@ -7,8 +7,6 @@ sources:
     include: [/var/log/xray/access.log, /var/log/xray/error.log]
     read_from: beginning
     max_line_bytes: 1048576
-    acknowledgements:
-      enabled: true
 transforms:
   access_candidates:
     type: filter

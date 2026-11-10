@@ -116,7 +116,7 @@ def main():
                 with psycopg.connect(ADMIN) as conn:
                     return conn.execute("SELECT 1").fetchone()[0] == 1
             wait_for(ready, "Postgres startup")
-            run("docker", "cp", DB + ":/certs/server.crt", str(root / "ca.pem"))
+            run("docker", "cp", DB + ":/certs/ca.crt", str(root / "ca.pem"))
             with psycopg.connect(ADMIN, autocommit=True) as admin:
                 admin.execute("CREATE SCHEMA partman; CREATE EXTENSION pg_partman SCHEMA partman")
                 for migration in sorted((ROOT / "sql").glob("00*.sql")):
