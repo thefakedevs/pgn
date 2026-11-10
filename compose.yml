@@ -1,6 +1,31 @@
 name: ${COMPOSE_PROJECT_NAME:-pgn}
 
 services:
+  vector:
+    image: timberio/vector:0.61.0-debian
+    profiles: [access-logs]
+    user: "0:0"
+    restart: unless-stopped
+    network_mode: host
+    command: ["--config", "/etc/vector/vector.yaml"]
+    environment:
+      ACCESS_LOG_POSTGRES_DSN: ${ACCESS_LOG_POSTGRES_DSN:-postgres://disabled@localhost/disabled?sslmode=verify-full}
+      ACCESS_LOG_NODE_ID: ${ACCESS_LOG_NODE_ID:-disabled}
+      ACCESS_LOG_BUFFER_BYTES: ${ACCESS_LOG_BUFFER_BYTES:-1073741824}
+      TZ: UTC
+    labels:
+      pgn.vector-revision: ${PGN_VECTOR_REVISION:-manual}
+    volumes:
+      - ./config/vector.yaml:/etc/vector/vector.yaml:ro
+      - ./config/postgres-ca.pem:/etc/vector/postgres-ca.pem:ro
+      - ./state/node/logs:/var/log/xray:ro
+      - ./state/vector:/var/lib/vector
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   pg-node:
     image: pasarguard/node:latest
     restart: unless-stopped
@@ -13,6 +38,7 @@ services:
       SSL_CERT_FILE: /var/lib/pg-node/certs/ssl_cert.pem
       SSL_KEY_FILE: /var/lib/pg-node/certs/ssl_key.pem
       GENERATED_CONFIG_PATH: /var/lib/pg-node/generated
+      TZ: UTC
     volumes:
       - ./state/node:/var/lib/pg-node
     logging: &logging
