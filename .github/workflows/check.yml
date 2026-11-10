@@ -1,6 +1,7 @@
 name: Checks
 on:
   push:
+    branches: [main]
   pull_request:
 permissions:
   contents: read
@@ -25,7 +26,7 @@ jobs:
           cp .env.example .env
           sed -i 's/vpn.example.com/node.example.net/g; s@/assets/change-me/@/assets/fixture/@' .env
           sudo ./pgn check
-          sed -i 's/MAINTENANCE_ENABLED=false/MAINTENANCE_ENABLED=true/' .env
+          sudo sed -i 's/MAINTENANCE_ENABLED=false/MAINTENANCE_ENABLED=true/' .env
           sudo ./pgn check
       - name: Shared TLS ingress with the production HAProxy image
         working-directory: maintenance/node-serviced

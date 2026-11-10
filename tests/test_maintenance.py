@@ -18,6 +18,37 @@ spec.loader.exec_module(m)
 
 
 class MaintenanceTests(unittest.TestCase):
+    def test_each_update_changes_only_the_requested_component(self):
+        for operation in ['update', 'core-update', 'geofiles']:
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / '.env').write_text('API_KEY=keep-identity\n')
+                (root / 'compose.yml').write_text('keep-existing-compose\n')
+                old = {'xray': b'old-xray', 'geoip.dat': b'old-geoip', 'geosite.dat': b'old-geosite'}
+                def snapshot(root, values, compose, backup):
+                    for name, content in old.items():
+                        (backup / name).write_bytes(content)
+                    m.write_json(backup / 'before.json', {'rollback_tag': 'local/pgn-node:rollback-fixture'})
+                    return {}, 'pasarguard/node:v0.5.7'
+                def run(args):
+                    return 'Xray 26.11.9 fixture' if 'version' in args else ''
+                def apply(root, values, compose, container, candidate, record, backup):
+                    expected_base = 'pasarguard/node:v0.5.8' if operation == 'update' else 'pasarguard/node:v0.5.7'
+                    self.assertEqual(record['base_image'], expected_base)
+                    self.assertEqual((backup / 'xray').read_bytes(), b'new-xray' if operation == 'core-update' else old['xray'])
+                    for name in ['geoip.dat', 'geosite.dat']:
+                        self.assertEqual((backup / name).read_bytes(), b'new-geo' * 200 if operation == 'geofiles' else old[name])
+                args = argparse.Namespace(command=operation, version='latest', region='russia')
+                with patch.object(m, 'snapshot', side_effect=snapshot), patch.object(m, 'command', side_effect=run), \
+                        patch.object(m, 'release', return_value={'tag_name': 'v0.5.8'}), \
+                        patch.object(m, 'xray_binary', return_value=b'new-xray'), \
+                        patch.object(m, 'asset', return_value=b'new-geo' * 200), \
+                        patch.object(m, 'apply_candidate', side_effect=apply) as applied, patch('builtins.print'):
+                    m.update(root, args, {}, unittest.mock.Mock())
+                    applied.assert_called_once()
+                self.assertEqual((root / '.env').read_text(), 'API_KEY=keep-identity\n')
+                self.assertEqual((root / 'compose.yml').read_text(), 'keep-existing-compose\n')
+
     def test_xray_download_requires_matching_sha256(self):
         output = io.BytesIO()
         with zipfile.ZipFile(output, 'w') as z:
