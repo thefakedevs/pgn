@@ -239,7 +239,9 @@ def prepare(root):
         else:
             ca_text = "# System trust store is used when no custom CA is configured.\n"
         atomic_write(root / "config/postgres-ca.pem", ca_text, 0o644)
-        atomic_write(root / "config/vector.yaml", (root / "templates/vector.yaml.tpl").read_text(encoding="utf-8"))
+        vector_config = (root / "templates/vector.yaml.tpl").read_text(encoding="utf-8")
+        vector_config = vector_config.replace("@@ACCESS_LOG_BUFFER_BYTES@@", str(int(values["ACCESS_LOG_BUFFER_BYTES"])))
+        atomic_write(root / "config/vector.yaml", vector_config)
         (root / "state/vector").mkdir(parents=True, exist_ok=True)
         (root / "state/node/logs").mkdir(parents=True, exist_ok=True)
     for directory in ("state/node/generated", "state/caddy/data", "state/caddy/config"):

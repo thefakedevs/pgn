@@ -67,7 +67,7 @@ sinks:
       timeout_secs: 1
     buffer:
       type: disk
-      max_size: ${ACCESS_LOG_BUFFER_BYTES}
+      max_size: @@ACCESS_LOG_BUFFER_BYTES@@
       when_full: block
     request:
       concurrency: 1
