@@ -25,3 +25,5 @@ jobs:
           python3 -m venv /tmp/pgn-test-venv
           /tmp/pgn-test-venv/bin/pip install h2==4.3.0
           sudo /tmp/pgn-test-venv/bin/python tests/ingress.py
+      - name: Fresh-install Russian geofiles with real Xray
+        run: sudo python3 tests/bootstrap.py

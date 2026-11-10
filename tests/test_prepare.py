@@ -50,6 +50,7 @@ class PrepareTests(unittest.TestCase):
 
     def test_first_prepare_and_repeated_prepare_preserve_identity(self):
         first = pgn.prepare(self.root)
+        self.assertTrue((self.root / 'state/node/.fresh-install.json').exists())
         self.assertEqual(str(uuid.UUID(first["API_KEY"])), first["API_KEY"])
         files = [self.root / ".env", self.root / "state/node/certs/ssl_cert.pem",
                  self.root / "state/node/certs/ssl_key.pem"]
@@ -68,6 +69,7 @@ class PrepareTests(unittest.TestCase):
         values = pgn.prepare(self.root)
         self.assertEqual(values["API_KEY"], self.values["API_KEY"])
         self.assertEqual(cert.read_bytes(), before)
+        self.assertFalse((self.root / 'state/node/.fresh-install.json').exists())
 
     def test_lost_api_key_is_not_silently_replaced(self):
         self.use_existing_identity()

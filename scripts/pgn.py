@@ -199,6 +199,8 @@ def prepare(root):
         raise ConfigError("Установите OpenSSL: apt-get install openssl")
     # Validate an existing identity before changing anything else.
     cert_dir = root / "state/node/certs"
+    node_state = root / "state/node"
+    fresh_install = not any(p.is_file() for p in node_state.rglob("*"))
     if any((cert_dir / n).exists() for n in ("ssl_cert.pem", "ssl_key.pem")):
         check_certificate(cert_dir / "ssl_cert.pem", cert_dir / "ssl_key.pem", values["API_DOMAIN"])
     if not values["API_KEY"]:
@@ -209,6 +211,9 @@ def prepare(root):
         save_api_key(root, values["API_KEY"])
     else:
         os.chmod(root / ".env", 0o600)
+    if fresh_install and not (root / "config/node-runtime.compose.json").exists():
+        # Persistent marker survives prepare/check and failed first-up retries.
+        atomic_write(node_state / ".fresh-install.json", '{"geofiles": "russia", "status": "pending"}\n')
     ensure_certificate(root, values["API_DOMAIN"])
     render(root, values)
     for directory in ("state/node/generated", "state/caddy/data", "state/caddy/config",
@@ -377,6 +382,11 @@ def main():
                 if args.command == "check":
                     print("Compose, HAProxy и Caddy: конфигурация корректна. VPN-клиент не проверялся.")
                     return 0
+                from pgn_maintenance import initial_geofiles, MaintenanceError
+                try:
+                    initial_geofiles(ROOT, values, compose)
+                except (MaintenanceError, ValueError, KeyError) as exc:
+                    raise ConfigError(str(exc)) from None
                 compose(ROOT, values, "up", "-d")
                 compose(ROOT, values, "ps")
                 print("Контейнеры запущены. Дождитесь сертификата Caddy и подключения панели.\n")

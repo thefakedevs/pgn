@@ -79,6 +79,59 @@ def asset(info, name):
     return download(matches[0]["browser_download_url"])
 
 
+def initial_geofiles(root, values, compose):
+    """Install current Russian databases once, before a clean node ever starts."""
+    pending = root / "state/node/.fresh-install.json"
+    override = root / "config/node-runtime.compose.json"
+    if not pending.exists():
+        return
+    if override.exists() or any((root / "state/node/generated").rglob("*.json")):
+        pending.unlink()
+        return
+    if compose(root, values, "ps", "-a", "-q", "pg-node", capture=True).strip():
+        # Includes stopped containers: bootstrap must never replace an existing node.
+        pending.unlink()
+        return
+    config = json.loads(compose(root, values, "config", "--format", "json", capture=True))
+    base = config["services"]["pg-node"]["image"]
+    if not re.fullmatch(r"pasarguard/node:v[0-9]+\.[0-9]+\.[0-9]+", base):
+        raise MaintenanceError("Fresh install expects an official versioned node image")
+    info = release(GEO_REPOS["russia"])
+    tag = re.sub(r"[^A-Za-z0-9_.-]", "-", info["tag_name"])[:80]
+    candidate = "local/pgn-node:" + base.rsplit(":v", 1)[1] + "-ru-" + tag
+    checksums = {}
+    stage = root / "state/bootstrap"
+    stage.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=stage) as directory:
+        directory = Path(directory)
+        for name in ("geoip.dat", "geosite.dat"):
+            data = asset(info, name)
+            checksum = asset(info, name + ".sha256sum").decode("ascii").split()
+            if (len(data) < 1024 or not checksum
+                    or hashlib.sha256(data).hexdigest() != checksum[0].lower()):
+                raise MaintenanceError("Russian geofile checksum mismatch: " + name)
+            (directory / name).write_bytes(data)
+            checksums[name] = checksum[0].lower()
+        (directory / "Dockerfile").write_text(
+            f"FROM {base}\nCOPY --chmod=0644 geoip.dat geosite.dat /usr/local/share/xray/\n")
+        command(["docker", "build", "--tag", candidate, str(directory)])
+        check = directory / "check.json"
+        write_json(check, {"outbounds": [{"protocol": "freedom", "tag": "direct"}],
+                   "routing": {"rules": [
+                       {"type": "field", "ip": ["geoip:ru-blocked"], "outboundTag": "direct"},
+                       {"type": "field", "domain": ["geosite:ru-blocked"], "outboundTag": "direct"}]}})
+        command(["docker", "run", "--rm", "--network", "none", "--entrypoint", "/usr/local/bin/xray",
+                 "-e", "XRAY_LOCATION_ASSET=/usr/local/share/xray", "--mount",
+                 f"type=bind,src={check},dst=/tmp/geofiles-check.json,readonly", candidate,
+                 "run", "-test", "-c", "/tmp/geofiles-check.json"])
+    record = {"base_image": base, "image": candidate, "operation": "fresh_install",
+              "geofiles_region": "russia", "geofiles_release": info["tag_name"], "checksums": checksums}
+    write_json(root / "config/node-runtime.json", record)
+    write_json(override, {"services": {"pg-node": {"image": candidate}}})
+    pending.unlink()
+    print("Fresh install: Russian geofiles " + info["tag_name"] + " verified and loaded by Xray")
+
+
 def xray_binary(info):
     arch = platform.machine()
     names = {"x86_64": "Xray-linux-64.zip", "aarch64": "Xray-linux-arm64-v8a.zip"}
