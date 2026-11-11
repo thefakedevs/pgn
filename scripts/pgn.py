@@ -21,6 +21,9 @@ ACCESS_DEFAULTS = {"ACCESS_LOG_ENABLED": "false", "ACCESS_LOG_POSTGRES_DSN": "",
                    "ACCESS_LOG_NODE_ID": "", "ACCESS_LOG_BUFFER_BYTES": "1073741824",
                    "ACCESS_LOG_POSTGRES_CA_FILE": ""}
 KEYS.update(ACCESS_DEFAULTS)
+GEOFILES_DEFAULTS = {"GEOFILES_UPDATE_INTERVAL": "21600", "GEOFILES_RELOAD_AT": "02:00",
+                     "GEOFILES_TIMEZONE": "Europe/Moscow"}
+KEYS.update(GEOFILES_DEFAULTS)
 
 
 class ConfigError(Exception):
@@ -84,6 +87,15 @@ def validate(values):
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", project):
         raise ConfigError("COMPOSE_PROJECT_NAME: до 63 символов a-z, 0-9, _ и -; первый символ — буква или цифра.")
     values["COMPOSE_PROJECT_NAME"] = project
+    for name, default in GEOFILES_DEFAULTS.items():
+        values.setdefault(name, default)
+    interval = values["GEOFILES_UPDATE_INTERVAL"]
+    if not re.fullmatch(r"[0-9]{1,6}", interval) or not 300 <= int(interval) <= 604800:
+        raise ConfigError("GEOFILES_UPDATE_INTERVAL: целое число секунд от 300 до 604800.")
+    if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", values["GEOFILES_RELOAD_AT"]):
+        raise ConfigError("GEOFILES_RELOAD_AT: время в формате HH:MM (00:00–23:59).")
+    if not re.fullmatch(r"[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*", values["GEOFILES_TIMEZONE"]):
+        raise ConfigError("GEOFILES_TIMEZONE: укажите часовой пояс IANA, например Europe/Moscow.")
     for name, default in ACCESS_DEFAULTS.items():
         values.setdefault(name, default)
     if values["ACCESS_LOG_ENABLED"] not in {"true", "false"}:
@@ -246,7 +258,7 @@ def prepare(root):
         atomic_write(root / "config/vector.yaml", vector_config)
         (root / "state/vector").mkdir(parents=True, exist_ok=True)
         (root / "state/node/logs").mkdir(parents=True, exist_ok=True)
-    for directory in ("state/node/generated", "state/caddy/data", "state/caddy/config"):
+    for directory in ("state/node/generated", "state/caddy/data", "state/caddy/config", "state/geofiles"):
         (root / directory).mkdir(parents=True, exist_ok=True)
     return values
 
@@ -255,6 +267,13 @@ def compose(root, values, *args, capture=False):
     env = os.environ.copy()
     env.update(values)
     env["COMPOSE_PROFILES"] = ""
+    # Use the deployment identity for private bind mounts without DAC capabilities.
+    env["PGN_RUN_UID"] = str(os.getuid()) if hasattr(os, "getuid") else "0"
+    env["PGN_RUN_GID"] = str(os.getgid()) if hasattr(os, "getgid") else "0"
+    try:
+        env["PGN_DOCKER_SOCKET_GID"] = str(Path("/var/run/docker.sock").stat().st_gid)
+    except FileNotFoundError:
+        env["PGN_DOCKER_SOCKET_GID"] = "0"
     if values.get("ACCESS_LOG_POSTGRES_CA_FILE") and values.get("ACCESS_LOG_POSTGRES_DSN"):
         uri = urlsplit(values["ACCESS_LOG_POSTGRES_DSN"])
         env["ACCESS_LOG_POSTGRES_DSN"] = urlunsplit(uri._replace(
@@ -304,6 +323,7 @@ def require_docker():
 
 def check_stack(root, values):
     compose(root, values, "config", "--quiet")
+    compose(root, values, "run", "--rm", "--no-deps", "--build", "-T", "geofiles", "--check")
     compose(root, values, "run", "--rm", "--no-deps", "-T", "--entrypoint", "haproxy",
             "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg")
     compose(root, values, "run", "--rm", "--no-deps", "-T", "--entrypoint", "caddy",
@@ -368,7 +388,7 @@ def main():
         epilog="""Команды:
   help     показать эту справку
   prepare  создать конфиги, API-ключ и сертификат; вывести данные панели
-  check    проверить Compose, HAProxy, Caddy и опциональный Vector
+  check    проверить Compose, geofiles, HAProxy, Caddy и опциональный Vector
   up       подготовить, проверить и запустить контейнеры
   info     показать данные подключения ноды к панели
   status   показать состояние контейнеров
@@ -407,7 +427,7 @@ def main():
                 values = prepare(ROOT)
                 check_stack(ROOT, values)
                 if args.command == "check":
-                    components = "Compose, HAProxy, Caddy" + (", Vector" if values["ACCESS_LOG_ENABLED"] == "true" else "")
+                    components = "Compose, geofiles, HAProxy, Caddy" + (", Vector" if values["ACCESS_LOG_ENABLED"] == "true" else "")
                     print(f"{components}: конфигурация корректна. VPN-клиент и доступность БД не проверялись.")
                     return 0
                 if values["ACCESS_LOG_ENABLED"] == "false":

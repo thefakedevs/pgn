@@ -64,7 +64,7 @@ class AccessLogTests(unittest.TestCase):
     def test_vector_checks_only_when_enabled(self):
         with patch.object(pgn, "compose") as compose:
             pgn.check_stack(Path("."), pgn.validate(self.base))
-            self.assertEqual(compose.call_count, 3)
+            self.assertEqual(compose.call_count, 4)
             compose.reset_mock()
             pgn.check_stack(Path("."), pgn.validate(self.enabled))
             calls = str(compose.call_args_list)

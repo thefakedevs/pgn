@@ -1,6 +1,35 @@
 name: ${COMPOSE_PROJECT_NAME:-pgn}
 
 services:
+  geofiles:
+    build:
+      context: .
+      dockerfile: docker/geofiles.Dockerfile
+    restart: unless-stopped
+    user: "${PGN_RUN_UID:-0}:${PGN_RUN_GID:-0}"
+    group_add: ["${PGN_DOCKER_SOCKET_GID:-0}"]
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-pgn}
+      GEOFILES_UPDATE_INTERVAL: ${GEOFILES_UPDATE_INTERVAL:-21600}
+      GEOFILES_RELOAD_AT: ${GEOFILES_RELOAD_AT:-02:00}
+      GEOFILES_TIMEZONE: ${GEOFILES_TIMEZONE:-Europe/Moscow}
+    volumes:
+      - ./state/geofiles:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "python", "/app/geofiles.py", "--healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 120
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   vector:
     image: timberio/vector:0.61.0-debian
     profiles: [access-logs]
@@ -32,6 +61,9 @@ services:
     image: pasarguard/node:latest
     restart: unless-stopped
     network_mode: host
+    depends_on:
+      geofiles:
+        condition: service_healthy
     environment:
       API_KEY: ${API_KEY:?Run ./pgn prepare first}
       NODE_HOST: "127.0.0.1"
@@ -40,9 +72,11 @@ services:
       SSL_CERT_FILE: /var/lib/pg-node/certs/ssl_cert.pem
       SSL_KEY_FILE: /var/lib/pg-node/certs/ssl_key.pem
       GENERATED_CONFIG_PATH: /var/lib/pg-node/generated
+      XRAY_ASSETS_PATH: /usr/local/share/xray/current
       TZ: UTC
     volumes:
       - ./state/node:/var/lib/pg-node
+      - ./state/geofiles:/usr/local/share/xray:ro
     logging: &logging
       driver: json-file
       options:
