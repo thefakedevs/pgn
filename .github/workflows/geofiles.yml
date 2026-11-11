@@ -1,0 +1,22 @@
+name: Geofiles
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m unittest discover -s tests -v
+      - name: Validate Compose wiring
+        env:
+          API_KEY: 00000000-0000-4000-8000-000000000001
+        run: docker compose config --quiet
+      - run: python tests/integration/geofiles.py

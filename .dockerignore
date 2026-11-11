@@ -1,0 +1,7 @@
+*
+!scripts/
+scripts/*
+!scripts/geofiles.py
+!docker/
+docker/*
+!docker/geofiles.Dockerfile
