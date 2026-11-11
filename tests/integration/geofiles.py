@@ -2,6 +2,7 @@
 """Exercise the real updater image, atomic links and Docker restart selection."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -66,21 +67,24 @@ def main():
                                       f"com.docker.compose.oneoff={oneoff}", "--entrypoint", "python", IMAGE,
                                       "-c", "import time; time.sleep(600)"))
             before = [run("inspect", "--format", "{{.State.StartedAt}}", cid) for cid in containers]
-            run("run", "--rm", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+            identity = f"{os.getuid()}:{os.getgid()}"
+            socket_group = str(Path("/var/run/docker.sock").stat().st_gid)
+            run("run", "--rm", "--read-only", "--cap-drop", "ALL", "--user", identity,
+                "--group-add", socket_group,
+                "--security-opt", "no-new-privileges:true",
                 "-e", f"COMPOSE_PROJECT_NAME={project}", "-v", f"{directory}:/data",
                 "-v", "/var/run/docker.sock:/var/run/docker.sock:ro",
                 "-v", f"{Path(__file__).resolve()}:/test.py:ro", "--entrypoint", "python", IMAGE, "/test.py", "--inside")
             after = [run("inspect", "--format", "{{.State.StartedAt}}", cid) for cid in containers]
             assert before[0] != after[0], "Selected node was not restarted"
             assert before[1:] == after[1:], "An unrelated node or one-off container was restarted"
-            run("run", "--rm", "--read-only", "-v", f"{directory}:/data", IMAGE, "--healthcheck")
+            run("run", "--rm", "--read-only", "--cap-drop", "ALL", "--user", identity,
+                "-v", f"{directory}:/data", IMAGE, "--healthcheck")
             run("run", "--rm", "--read-only", IMAGE, "--check")
             print("Geofiles Docker integration passed")
         finally:
             for cid in containers:
                 run("rm", "-f", cid)
-            run("run", "--rm", "-v", f"{directory}:/data", "--entrypoint", "sh", IMAGE,
-                "-c", "chmod -R a+rwX /data")
 
 
 if __name__ == "__main__":

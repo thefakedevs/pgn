@@ -267,6 +267,13 @@ def compose(root, values, *args, capture=False):
     env = os.environ.copy()
     env.update(values)
     env["COMPOSE_PROFILES"] = ""
+    # Use the deployment identity for private bind mounts without DAC capabilities.
+    env["PGN_RUN_UID"] = str(os.getuid()) if hasattr(os, "getuid") else "0"
+    env["PGN_RUN_GID"] = str(os.getgid()) if hasattr(os, "getgid") else "0"
+    try:
+        env["PGN_DOCKER_SOCKET_GID"] = str(Path("/var/run/docker.sock").stat().st_gid)
+    except FileNotFoundError:
+        env["PGN_DOCKER_SOCKET_GID"] = "0"
     if values.get("ACCESS_LOG_POSTGRES_CA_FILE") and values.get("ACCESS_LOG_POSTGRES_DSN"):
         uri = urlsplit(values["ACCESS_LOG_POSTGRES_DSN"])
         env["ACCESS_LOG_POSTGRES_DSN"] = urlunsplit(uri._replace(

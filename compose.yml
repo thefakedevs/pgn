@@ -6,6 +6,8 @@ services:
       context: .
       dockerfile: docker/geofiles.Dockerfile
     restart: unless-stopped
+    user: "${PGN_RUN_UID:-0}:${PGN_RUN_GID:-0}"
+    group_add: ["${PGN_DOCKER_SOCKET_GID:-0}"]
     environment:
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-pgn}
       GEOFILES_UPDATE_INTERVAL: ${GEOFILES_UPDATE_INTERVAL:-21600}
